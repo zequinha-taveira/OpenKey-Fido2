@@ -1,0 +1,25 @@
+# Configuração local do crate standalone `rp2350-firmware`.
+#
+# `cargo build` (sem argumentos) usa o target Cortex-M33 do RP2350 por padrão.
+# O `runner` usa probe-rs para `cargo run` em hardware real.
+
+[build]
+target = "thumbv8m.main-none-eabihf"
+
+[target.thumbv8m.main-none-eabihf]
+rustflags = [
+    "-C", "link-arg=--nmagic",
+    "-C", "link-arg=-Tlink.x",
+    "-C", "target-cpu=cortex-m33",
+]
+runner = "probe-rs run --chip RP235x"
+
+# Toolchain C exigida pelo build.rs do ring (fontes/asm em C).
+# cc respeita <TARGET>_CC / <TARGET>_AR com o target em snake_case.
+# (seção [env] plana: cargo estável não aplica [env] condicional a target)
+# NOTA: nome sem caminho evita quebra em Linux CI (apt gcc-arm-none-eabi) e
+# Windows (PATH do Pico SDK); path com espaço quebra cc-rs ("C:/Program").
+[env]
+CC_thumbv8m_main_none_eabihf = "arm-none-eabi-gcc"
+AR_thumbv8m_main_none_eabihf = "arm-none-eabi-ar"
+CXX_thumbv8m_main_none_eabihf = "arm-none-eabi-g++"

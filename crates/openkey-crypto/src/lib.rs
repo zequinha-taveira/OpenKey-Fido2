@@ -1,0 +1,33 @@
+//! Primitivas criptográficas do openkey-fido2.
+//!
+//! Encapsula `ring` (ADR-0001) atrás de uma API estável, de forma que trocar o
+//! provedor criptográfico não exija mudanças nas camadas CTAP2/storage.
+//!
+//! Compila tanto em host (`std`, padrão) quanto em alvos bare-metal
+//! (`no_std` + `alloc`) via a feature `std`; o alvo embarcado usa
+//! `--no-default-features`.
+
+#![cfg_attr(not(feature = "std"), no_std)]
+
+/// Motor criptográfico principal (Ed25519, P-256, RSA, HMAC, ChaCha20-Poly1305).
+pub mod crypto;
+pub mod ecdsa;
+pub mod ed25519;
+pub mod hash;
+/// Encriptação híbrida (ECIES X25519 + ChaCha20-Poly1305).
+pub mod hybrid;
+pub mod key_agreement;
+/// Protocolo PIN/UV (CTAP 2.1 §6.5.6/§6.5.7): ECDH P-256, AES-CBC, HKDF, HMAC.
+pub mod pin_protocol;
+pub mod random;
+pub mod traits;
+
+pub use crypto::{constant_time_eq, CryptoEngine};
+pub use hybrid::{
+    hybrid_decrypt, hybrid_encrypt, hybrid_generate_keypair, HybridCiphertext, ECIES_OVERHEAD,
+    NONCE_LEN, TAG_LEN, X25519_KEY_LEN,
+};
+pub use pin_protocol::{
+    aes256_cbc_decrypt, aes256_cbc_encrypt, hkdf_sha256, strip_zero_padding, zero_pad_to_64,
+    PinAgreementKey, PinUvProtocol, Zeroizing,
+};

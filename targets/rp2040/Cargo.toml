@@ -1,0 +1,9 @@
+[package]
+name = "openkey-target-rp2040"
+version.workspace = true
+edition.workspace = true
+description = "RP2040 target scaffold for OpenKey"
+license.workspace = true
+
+[lib]
+name = "target_rp2040"

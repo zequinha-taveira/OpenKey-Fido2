@@ -1,0 +1,760 @@
+use crate::profile::{
+    Capabilities, CapabilityDiscovery, DeviceProfile, DeviceProfileBuilder, Extension, Protocol,
+    TransportConfig, TransportType,
+};
+use alloc::boxed::Box;
+use alloc::string::ToString;
+use alloc::vec::Vec;
+use board_generic::{
+    BoardDefinition, BootselButton, Rp2350Qspi, UserPresenceButton, UserPresenceSource,
+    UserVerificationDevice,
+};
+use core::fmt;
+use crypto::CryptoEngine;
+use log::info;
+use openkey_core::ctap2;
+use openkey_core::webauthn::WebAuthnAuthenticator;
+#[cfg(feature = "std")]
+use std::path::PathBuf;
+#[cfg(feature = "std")]
+use storage::FileStorageBackend;
+use storage::StorageEngine;
+use transport::{
+    BleGattTransport, MultiTransport, NfcTransport, Transport, UsbCcidTransport, UsbHidTransport,
+};
+
+extern crate alloc;
+
+/// Deriva a chave-mestra do caminho do arquivo de persistência (host).
+///
+/// **Inseguro por construção**: ver [`InsecureHostStorage`].
+#[cfg(feature = "std")]
+fn derive_key_from_path(path: &std::path::Path) -> [u8; 32] {
+    use ring::digest;
+    let path_bytes = path.to_string_lossy();
+    let hash = digest::digest(&digest::SHA256, path_bytes.as_bytes());
+    // Sem buffer zerado intermediário: converte o digest direto para evitar
+    // valor criptográfico hard-coded (CodeQL rust/hard-coded-cryptographic-value).
+    // Derivação determinística intencional, coberta por `InsecureHostStorage`.
+    hash.as_ref().try_into().expect("SHA-256 produz 32 bytes")
+}
+
+/// Marcador explícito de storage de host **inseguro**.
+///
+/// A chave-mestra do storage persistente é derivada do caminho do arquivo
+/// (`SHA-256(caminho)`): **qualquer** leitor local pode rederivá-la a partir
+/// do próprio caminho e decifrar todas as credenciais gravadas. A cifra em
+/// repouso (ChaCha20-Poly1305) não muda esse quadro — a confidencialidade se
+/// reduz a ofuscação do caminho.
+///
+/// O tipo existe para que esse risco fique visível no código:
+/// [`EmbeddedAuthenticator::new_with_insecure_host_storage`] só aceita este
+/// marcador, então todo call site declara estar usando uma chave publicamente
+/// derivável. Uso restrito a simulador e testes; produto real exige chave de
+/// secure element injetada pelo integrador (crypto/storage próprios).
+///
+/// Disponível apenas em hosts (feature `std`); o alvo embarcado usa
+/// `StorageEngine::new()` (RAM) ou um backend de flash próprio.
+#[cfg(feature = "std")]
+pub struct InsecureHostStorage {
+    path: PathBuf,
+}
+
+#[cfg(feature = "std")]
+impl InsecureHostStorage {
+    /// Cria o marcador para o arquivo de persistência indicado.
+    ///
+    /// O par com [`EmbeddedAuthenticator::new_with_insecure_host_storage`]
+    /// deixa o risco evidente no call site:
+    /// `EmbeddedAuthenticator::new_with_insecure_host_storage(
+    /// InsecureHostStorage::new(path), profile)`.
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+#[cfg(feature = "std")]
+impl fmt::Debug for InsecureHostStorage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // O caminho é configuração fornecida pelo chamador (não é material
+        // criptográfico); imprimi-lo identifica o storage em diagnóstico.
+        f.debug_struct("InsecureHostStorage")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+/// Autenticador FIDO2 completo, pronto para uso por um host ou transporte.
+///
+/// Reúne validação WebAuthn, estado CTAP2, criptografia, storage e o
+/// transporte derivado do [`DeviceProfile`]. É a única API que integradores
+/// precisam conhecer.
+///
+/// Suporte multi-protocolo (ADR-0024): o autenticador pode operar com
+/// múltiplos transportes simultâneos (HID + CCID + NFC + BLE). O campo
+/// legado `transport` foi unificado em `transports: Vec<>` com acessores
+/// compatíveis (`transport()` retorna o primeiro).
+pub struct EmbeddedAuthenticator {
+    webauthn: WebAuthnAuthenticator,
+    discovery: CapabilityDiscovery,
+    transports: Vec<Box<dyn Transport>>,
+}
+
+/// Adaptador entre um driver de sensor do board e a interface CTAP2.
+#[derive(Debug)]
+struct BoardUserVerification {
+    device: Box<dyn UserVerificationDevice>,
+}
+
+impl ctap2::UserVerification for BoardUserVerification {
+    fn verify(&mut self) -> Result<(), ctap2::Ctap2Error> {
+        self.device
+            .verify_user()
+            .map_err(|_| ctap2::Ctap2Error::UvBlocked)
+    }
+
+    fn retries(&self) -> u8 {
+        self.device.retries()
+    }
+}
+
+impl EmbeddedAuthenticator {
+    /// Cria um autenticador com o perfil genérico e storage em memória.
+    ///
+    /// Adequado a testes; produtos reais devem usar
+    /// [`EmbeddedAuthenticator::new_with_board`] ou `new_with_profile`.
+    pub fn new() -> Result<Self, Box<dyn core::error::Error>> {
+        Self::new_with_profile(DeviceProfileBuilder::new().build())
+    }
+
+    /// Cria um autenticador derivando o perfil de uma definição de board.
+    ///
+    /// AAGUID, transportes e features de segurança vêm do hardware.
+    pub fn new_with_board(board: &BoardDefinition) -> Result<Self, Box<dyn core::error::Error>> {
+        let profile = DeviceProfileBuilder::from_board(board).build();
+        let mut auth = Self::new_with_profile(profile)?;
+        auth.set_board_user_presence(board);
+        Ok(auth)
+    }
+
+    /// Cria um autenticador a partir de um perfil de produto explícito.
+    ///
+    /// As capabilities do perfil são traduzidas para o formato do CTAP2
+    /// GetInfo, mantendo perfil e resposta de protocolo em sincronia.
+    pub fn new_with_profile(profile: DeviceProfile) -> Result<Self, Box<dyn core::error::Error>> {
+        let crypto = CryptoEngine::new()?;
+        let storage = StorageEngine::new()?;
+        let authenticator = Self::from_profile_and_storage(profile, crypto, storage, None)?;
+
+        info!("FIDO2 Embedded Authenticator initialized");
+        Ok(authenticator)
+    }
+
+    /// Cria um autenticador com um perfil e um transporte fornecidos pelo chamador.
+    ///
+    /// O transporte injetado substitui o stub derivado de
+    /// `profile.transport_config`. Ele não é inicializado implicitamente;
+    /// controle o ciclo de vida por [`EmbeddedAuthenticator::transport_mut`].
+    /// Isso permite compor um adaptador USB-HID com um backend de host ou de
+    /// hardware sem alterar os construtores existentes.
+    pub fn new_with_profile_and_transport(
+        profile: DeviceProfile,
+        transport: Box<dyn Transport>,
+    ) -> Result<Self, Box<dyn core::error::Error>> {
+        let crypto = CryptoEngine::new()?;
+        let storage = StorageEngine::new()?;
+        let authenticator =
+            Self::from_profile_and_storage(profile, crypto, storage, Some(transport))?;
+
+        info!("FIDO2 Embedded Authenticator initialized with injected transport");
+        Ok(authenticator)
+    }
+
+    /// Cria um autenticador com credenciais persistidas em arquivo.
+    ///
+    /// A chave-mestra é derivada do caminho do arquivo (veja
+    /// [`InsecureHostStorage`]), de modo que reabrir o mesmo storage recupere
+    /// as credenciais. O gate é deliberado: só é possível invocar este
+    /// construtor com o marcador [`InsecureHostStorage`], tornando o uso de
+    /// chave publicamente derivável explícito em todo call site. Adequado ao
+    /// simulador e a testes — **não** a produtos, onde a chave deve vir de
+    /// secure element.
+    #[cfg(feature = "std")]
+    pub fn new_with_insecure_host_storage(
+        storage: InsecureHostStorage,
+        profile: DeviceProfile,
+    ) -> Result<Self, Box<dyn core::error::Error>> {
+        let key = derive_key_from_path(&storage.path);
+        let crypto = CryptoEngine::from_key(key);
+        let backend = FileStorageBackend::new(storage.path)?;
+        let engine = StorageEngine::with_backend(Box::new(backend));
+        let authenticator = Self::from_profile_and_storage(profile, crypto, engine, None)?;
+
+        info!("FIDO2 Embedded Authenticator initialized with persistent storage");
+        Ok(authenticator)
+    }
+
+    fn from_profile_and_storage(
+        profile: DeviceProfile,
+        crypto: CryptoEngine,
+        storage: StorageEngine,
+        injected_transport: Option<Box<dyn Transport>>,
+    ) -> Result<Self, Box<dyn core::error::Error>> {
+        let mut webauthn = WebAuthnAuthenticator::new(profile.aaguid, crypto, storage)?;
+        let mut transports = init_transports(&profile.active_transport_configs());
+        if let Some(injected) = injected_transport {
+            // Injeção explícita tem precedência sobre o perfil; substitui a lista.
+            transports = alloc::vec![injected];
+        }
+        let discovery = CapabilityDiscovery::new(profile);
+        webauthn.set_capabilities(ctap2_capabilities(&discovery.capabilities()));
+
+        Ok(Self {
+            webauthn,
+            discovery,
+            transports,
+        })
+    }
+
+    /// Transporte configurado no perfil ou injetado pelo chamador, quando houver (legado: primeiro da lista).
+    pub fn transport(&self) -> Option<&dyn Transport> {
+        self.transports.first().map(|t| t.as_ref())
+    }
+
+    /// Acesso mutável ao transporte, para `init`/`send`/`recv`/`close` (legado: primeiro).
+    pub fn transport_mut(&mut self) -> Option<&mut Box<dyn Transport>> {
+        self.transports.first_mut()
+    }
+
+    /// Lista completa de transportes ativos (multi-protocolo, ADR-0024).
+    pub fn transports(&self) -> &[Box<dyn Transport>] {
+        &self.transports
+    }
+
+    /// Acesso mutável à lista completa de transportes.
+    pub fn transports_mut(&mut self) -> &mut [Box<dyn Transport>] {
+        &mut self.transports
+    }
+
+    /// Adiciona um transporte adicional em runtime (multi-protocolo).
+    pub fn add_transport(&mut self, transport: Box<dyn Transport>) {
+        self.transports.push(transport);
+    }
+
+    /// Cria um autenticador com múltiplos transportes injetados (multi-protocolo).
+    pub fn new_with_profile_and_transports(
+        profile: DeviceProfile,
+        transports: Vec<Box<dyn Transport>>,
+    ) -> Result<Self, Box<dyn core::error::Error>> {
+        let crypto = CryptoEngine::new()?;
+        let storage = StorageEngine::new()?;
+        let mut webauthn = WebAuthnAuthenticator::new(profile.aaguid, crypto, storage)?;
+        let discovery = CapabilityDiscovery::new(profile);
+        webauthn.set_capabilities(ctap2_capabilities(&discovery.capabilities()));
+        Ok(Self {
+            webauthn,
+            discovery,
+            transports,
+        })
+    }
+
+    /// Acesso à camada WebAuthn, para inspeção em testes e ferramentas.
+    pub fn get_webauthn_authenticator(&self) -> &WebAuthnAuthenticator {
+        &self.webauthn
+    }
+
+    /// Acesso mutável à camada WebAuthn (ajuste de capabilities, attestation).
+    pub fn get_webauthn_authenticator_mut(&mut self) -> &mut WebAuthnAuthenticator {
+        &mut self.webauthn
+    }
+
+    /// Runtime capability report derived from the device profile.
+    pub fn capabilities(&self) -> Capabilities {
+        self.discovery.capabilities()
+    }
+
+    /// Perfil de produto que originou este autenticador.
+    pub fn profile(&self) -> &DeviceProfile {
+        self.discovery.profile()
+    }
+
+    /// Define a fonte de user presence aplicada ao check de `up` no CTAP2.
+    ///
+    /// `None` (padrão) considera o usuário presente — adequado a simulação e
+    /// testes sem botão físico.
+    pub fn set_user_presence(&mut self, presence: Option<Box<dyn ctap2::UserPresence>>) {
+        self.webauthn.set_user_presence(presence);
+    }
+
+    /// Define a verificação de usuário embutida (mock de host) aplicada ao
+    /// ClientPIN 0x06/0x07 e anunciada no GetInfo quando `uv` está habilitado
+    /// no perfil (`DeviceProfileBuilder::uv_support`).
+    ///
+    /// `None` (padrão) preserva o comportamento sem hardware: 0x06 retorna
+    /// `UvBlocked`, 0x07 retorna `UnsupportedOption` e `uv` não é anunciado.
+    pub fn set_user_verification(
+        &mut self,
+        verification: Option<Box<dyn ctap2::UserVerification>>,
+    ) {
+        self.webauthn.set_user_verification(verification);
+    }
+
+    /// Conecta um sensor UV fornecido pelo board.
+    ///
+    /// O perfil ainda precisa declarar `uv_support(true)` para anunciar a
+    /// capability no GetInfo. Sem essa declaração, o CTAP2 mantém o gate de
+    /// segurança e não aceita tokens UV mesmo que um driver esteja conectado.
+    pub fn set_board_user_verification(&mut self, device: Option<Box<dyn UserVerificationDevice>>) {
+        self.set_user_verification(device.map(|device| {
+            Box::new(BoardUserVerification { device }) as Box<dyn ctap2::UserVerification>
+        }));
+    }
+
+    /// Injeta um botão de user presence do board (ex.: BOOTSEL do RP2350).
+    pub fn set_user_presence_button<B>(&mut self, button: B)
+    where
+        B: UserPresenceButton + core::fmt::Debug + 'static,
+    {
+        self.set_user_presence(Some(Box::new(ButtonPresence(button))));
+    }
+
+    /// Aplica a fonte de user presence declarada no board ao check de `up`.
+    ///
+    /// Boards com [`UserPresenceSource::Bootsel`] (RP2350) ganham o sensor
+    /// BOOTSEL automaticamente, sem chamada manual a
+    /// [`EmbeddedAuthenticator::set_user_presence_button`].
+    fn set_board_user_presence(&mut self, board: &BoardDefinition) {
+        match board.presence_source {
+            UserPresenceSource::Bootsel => {
+                self.set_user_presence_button(BootselButton::new(Rp2350Qspi::new()));
+            }
+            UserPresenceSource::None => {}
+        }
+    }
+
+    /// Registra uma nova credencial (CTAP2 `authenticatorMakeCredential`).
+    pub fn make_credential(
+        &mut self,
+        request: ctap2::MakeCredentialRequest,
+    ) -> Result<ctap2::MakeCredentialResponse, Box<dyn core::error::Error>> {
+        self.webauthn.make_credential(request)
+    }
+
+    /// Autentica com uma credencial existente (CTAP2 `authenticatorGetAssertion`).
+    pub fn get_assertion(
+        &mut self,
+        request: ctap2::GetAssertionRequest,
+    ) -> Result<ctap2::GetAssertionResponse, Box<dyn core::error::Error>> {
+        self.webauthn.get_assertion(request)
+    }
+
+    /// Reporta versões, extensões e opções suportadas (CTAP2 `getInfo`).
+    pub fn get_info(&self) -> Result<ctap2::GetInfoResponse, Box<dyn core::error::Error>> {
+        self.webauthn.get_info()
+    }
+
+    /// Reporta versão, commit e build do firmware (comando de vendor).
+    pub fn get_version(&self) -> Result<ctap2::GetVersionResponse, Box<dyn core::error::Error>> {
+        self.webauthn.get_version()
+    }
+
+    /// Processa um comando CTAP2 bruto em CBOR.
+    ///
+    /// Fronteira do protocolo: qualquer erro interno já chega ao chamador
+    /// mapeado para um [`ctap2::Ctap2Error`] com código de status válido.
+    pub fn process_command(
+        &mut self,
+        cmd: u8,
+        data: Vec<u8>,
+    ) -> Result<Vec<u8>, ctap2::Ctap2Error> {
+        self.webauthn.process_command(cmd, data)
+    }
+}
+
+/// Adapta um [`UserPresenceButton`] do HAL para o [`ctap2::UserPresence`]
+/// consumido pelo autenticador.
+struct ButtonPresence<B>(B);
+
+impl<B> core::fmt::Debug for ButtonPresence<B> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ButtonPresence").finish_non_exhaustive()
+    }
+}
+
+impl<B: UserPresenceButton> ctap2::UserPresence for ButtonPresence<B> {
+    fn is_present(&mut self) -> bool {
+        self.0.is_pressed()
+    }
+}
+
+impl fmt::Debug for EmbeddedAuthenticator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EmbeddedAuthenticator")
+            .field("webauthn", &"...")
+            .field("discovery", &self.discovery)
+            .field("transports", &self.transports.len())
+            .finish()
+    }
+}
+
+fn init_transports(configs: &[TransportConfig]) -> Vec<Box<dyn Transport>> {
+    configs
+        .iter()
+        .map(|config| match config.transport_type {
+            TransportType::UsbHid => {
+                info!("Transport configured: USB-HID (stub)");
+                Box::new(UsbHidTransport::new()) as Box<dyn Transport>
+            }
+            TransportType::UsbCcid => {
+                info!("Transport configured: USB-CCID (stub)");
+                Box::new(UsbCcidTransport::new()) as Box<dyn Transport>
+            }
+            TransportType::Nfc => {
+                info!("Transport configured: NFC (stub)");
+                Box::new(NfcTransport::new()) as Box<dyn Transport>
+            }
+            TransportType::BleGatt => {
+                info!("Transport configured: BLE GATT (stub)");
+                Box::new(BleGattTransport::new()) as Box<dyn Transport>
+            }
+        })
+        .collect()
+}
+
+#[allow(dead_code)]
+fn init_transport(config: &Option<TransportConfig>) -> Option<Box<dyn Transport>> {
+    let slice = config
+        .as_ref()
+        .map(|c| alloc::vec![c.clone()])
+        .unwrap_or_default();
+    init_transports(&slice).into_iter().next()
+}
+
+/// Helper público para criar um `MultiTransport` a partir de configs.
+pub fn transports_from_profile(profile: &DeviceProfile) -> MultiTransport {
+    MultiTransport::new(init_transports(&profile.active_transport_configs()))
+}
+
+/// Maps runtime capabilities to the CTAP2 GetInfo wire format.
+fn ctap2_capabilities(caps: &Capabilities) -> ctap2::Ctap2Capabilities {
+    let mut versions = alloc::vec::Vec::new();
+    if caps.protocols.contains(&Protocol::Ctap2) {
+        versions.push("2.0".to_string());
+    }
+    if caps.protocols.contains(&Protocol::Ctap21) {
+        versions.push("2.1".to_string());
+    }
+    if versions.is_empty() {
+        versions.push("2.0".to_string());
+    }
+
+    let mut extensions = alloc::vec::Vec::new();
+    if caps.extensions.contains(&Extension::CredProtect) {
+        extensions.push("credProtect".to_string());
+    }
+    if caps.extensions.contains(&Extension::CredBlob) {
+        extensions.push("credBlob".to_string());
+    }
+    if caps.extensions.contains(&Extension::MinPinLength) {
+        extensions.push("minPinLength".to_string());
+    }
+    if caps.extensions.contains(&Extension::HmacSecret) {
+        extensions.push("hmac-secret".to_string());
+    }
+
+    let mut options = alloc::vec::Vec::new();
+    if caps.rk {
+        options.push("rk".to_string());
+    }
+    if caps.up {
+        options.push("up".to_string());
+    }
+    if caps.uv {
+        options.push("uv".to_string());
+    }
+    if caps.client_pin_available {
+        options.push("clientPin".to_string());
+        options.push("pinUvAuthToken".to_string());
+    }
+    // Credential Management é implementado pela máquina CTAP2 e precisa ser
+    // anunciado para permitir tokens PIN com escopo CM.
+    options.push("credMgmt".to_string());
+
+    let pin_uv_auth_protocols = if caps.client_pin_available || caps.uv {
+        alloc::vec![1, 2]
+    } else {
+        alloc::vec::Vec::new()
+    };
+
+    ctap2::Ctap2Capabilities {
+        aaguid: caps.aaguid,
+        versions,
+        extensions,
+        options,
+        rp_count: caps.rp_count,
+        max_cred_blob_length: caps.max_cred_blob_length,
+        max_credential_id_length: caps.max_credential_id_length,
+        max_credential_count: caps.max_credentials,
+        firmware_version: caps.firmware_version.to_string(),
+        min_pin_length: Some(4),
+        pin_uv_auth_protocols,
+        security: ctap2::SecurityFeatures {
+            secure_boot: caps.security.secure_boot,
+            trust_zone: caps.security.trust_zone,
+            hardware_rng: caps.security.hardware_rng,
+            sha256_accelerator: caps.security.sha256_accelerator,
+            debug_disable: caps.security.debug_disable,
+            otp_memory: caps.security.otp_memory,
+            unique_id: caps.security.unique_id,
+            tamper_detection: caps.security.tamper_detection,
+        },
+        max_large_blob_data_size: Some(4096),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    extern crate alloc;
+    use alloc::{string::ToString, vec};
+
+    fn request_with_up(up: bool) -> ctap2::MakeCredentialRequest {
+        ctap2::MakeCredentialRequest {
+            client_data_hash: b"test".to_vec(),
+            rp: ctap2::RelyingParty {
+                id: "example.com".to_string(),
+                name: None,
+                icon: None,
+            },
+            user: ctap2::User {
+                id: b"user123".to_vec(),
+                name: None,
+                display_name: None,
+                icon_url: None,
+            },
+            pub_key_cred_params: vec![ctap2::PublicKeyCredParams {
+                r#type: "public-key".to_string(),
+                algorithms: -7,
+            }],
+            exclude_list: vec![],
+            extensions: None,
+            options: ctap2::MakeCredentialOptions {
+                rk: false,
+                uv: false,
+                up,
+                extended: false,
+            },
+            pin_uv_auth_param: None,
+            pin_protocol: None,
+            enterprise_protections: None,
+        }
+    }
+
+    #[test]
+    fn test_bootsel_user_presence_denied_when_not_pressed() {
+        let mut auth = EmbeddedAuthenticator::new().unwrap();
+        // BOOTSEL não pressionado (padrão: CS em nível alto) => up negado.
+        auth.set_user_presence_button(BootselButton::new(Rp2350Qspi::new()));
+
+        match auth.make_credential(request_with_up(true)) {
+            Err(e) => assert_eq!(
+                e.downcast_ref::<ctap2::Ctap2Error>(),
+                Some(&ctap2::Ctap2Error::OperationDenied)
+            ),
+            Ok(_) => panic!("expected OperationDenied for BOOTSEL not pressed"),
+        }
+    }
+
+    #[test]
+    fn test_bootsel_user_presence_allowed_when_pressed() {
+        let mut qspi = Rp2350Qspi::new();
+        qspi.set_cs_level(false); // BOOTSEL pressionado (CS -> GND)
+        let mut auth = EmbeddedAuthenticator::new().unwrap();
+        auth.set_user_presence_button(BootselButton::new(qspi));
+
+        assert!(auth.make_credential(request_with_up(true)).is_ok());
+    }
+
+    #[test]
+    fn test_new_with_board_rp2350_auto_wires_bootsel_and_denies_up() {
+        let board =
+            BoardDefinition::new("rp2350", [0x05; 16]).presence_source(UserPresenceSource::Bootsel);
+        let mut auth = EmbeddedAuthenticator::new_with_board(&board).unwrap();
+        // BOOTSEL idle (não pressionado) => up negado, sem chamada manual.
+        match auth.make_credential(request_with_up(true)) {
+            Err(e) => assert_eq!(
+                e.downcast_ref::<ctap2::Ctap2Error>(),
+                Some(&ctap2::Ctap2Error::OperationDenied)
+            ),
+            Ok(_) => panic!("expected OperationDenied for RP2350 auto-wired BOOTSEL"),
+        }
+    }
+
+    #[test]
+    fn test_new_with_board_generic_allows_up() {
+        let board = BoardDefinition::new("generic", [0xff; 16]);
+        let mut auth = EmbeddedAuthenticator::new_with_board(&board).unwrap();
+        // Sem fonte automática => user presence ausente => up satisfeito.
+        assert!(auth.make_credential(request_with_up(true)).is_ok());
+    }
+
+    /// Mock de UV embutida restrito a host (sem alegações de hardware).
+    #[derive(Debug)]
+    struct MockUserVerification {
+        retries: u8,
+    }
+
+    impl ctap2::UserVerification for MockUserVerification {
+        fn verify(&mut self) -> Result<(), ctap2::Ctap2Error> {
+            Ok(())
+        }
+
+        fn retries(&self) -> u8 {
+            self.retries
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockBoardUserVerification {
+        retries: u8,
+    }
+
+    impl UserVerificationDevice for MockBoardUserVerification {
+        fn verify_user(&mut self) -> Result<(), board_generic::UserVerificationError> {
+            Ok(())
+        }
+
+        fn retries(&self) -> u8 {
+            self.retries
+        }
+    }
+
+    #[test]
+    fn test_uv_mock_wiring_advertises_uv_with_profile_cap() {
+        let profile = DeviceProfileBuilder::new().uv_support(true).build();
+        let mut auth = EmbeddedAuthenticator::new_with_profile(profile).unwrap();
+        // Capability `uv` sem mock => não anunciado (padrão, sem hardware).
+        assert!(!auth.get_info().unwrap().options.contains(&"uv".to_string()));
+        // Com mock injetado => anunciado.
+        auth.set_user_verification(Some(Box::new(MockUserVerification { retries: 3 })));
+        assert!(auth.get_info().unwrap().options.contains(&"uv".to_string()));
+    }
+
+    #[test]
+    fn test_board_uv_wiring_advertises_uv_with_profile_cap() {
+        let profile = DeviceProfileBuilder::new().uv_support(true).build();
+        let mut auth = EmbeddedAuthenticator::new_with_profile(profile).unwrap();
+        auth.set_board_user_verification(Some(Box::new(MockBoardUserVerification { retries: 5 })));
+
+        assert!(auth.get_info().unwrap().options.contains(&"uv".to_string()));
+    }
+
+    fn resident_request() -> ctap2::MakeCredentialRequest {
+        ctap2::MakeCredentialRequest {
+            client_data_hash: b"test".to_vec(),
+            rp: ctap2::RelyingParty {
+                id: "example.com".to_string(),
+                name: None,
+                icon: None,
+            },
+            user: ctap2::User {
+                id: b"user123".to_vec(),
+                name: None,
+                display_name: None,
+                icon_url: None,
+            },
+            pub_key_cred_params: vec![ctap2::PublicKeyCredParams {
+                r#type: "public-key".to_string(),
+                algorithms: -7,
+            }],
+            exclude_list: vec![],
+            extensions: None,
+            options: ctap2::MakeCredentialOptions {
+                rk: true,
+                uv: false,
+                up: true,
+                extended: false,
+            },
+            pin_uv_auth_param: None,
+            pin_protocol: None,
+            enterprise_protections: None,
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn test_insecure_host_storage_persists_across_restart() {
+        // Caminho único por execução para não colidir com testes paralelos.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "openkey_insecure_gate_{}_{}.json",
+            std::process::id(),
+            nanos
+        ));
+
+        // Sessão 1: credencial residente gravada no arquivo sob o gate.
+        let mut first = EmbeddedAuthenticator::new_with_insecure_host_storage(
+            InsecureHostStorage::new(path.clone()),
+            DeviceProfileBuilder::new().build(),
+        )
+        .unwrap();
+        assert!(first.make_credential(resident_request()).is_ok());
+        drop(first);
+
+        // Sessão 2: instância nova sobre o MESMO caminho recupera a
+        // credencial — prova que a derivação da chave sob o gate permaneceu
+        // idêntica ao comportamento anterior (mesmo SHA-256 do caminho).
+        let mut restarted = EmbeddedAuthenticator::new_with_insecure_host_storage(
+            InsecureHostStorage::new(path.clone()),
+            DeviceProfileBuilder::new().build(),
+        )
+        .unwrap();
+        let assertion = restarted
+            .get_assertion(ctap2::GetAssertionRequest {
+                rp_id: "example.com".to_string(),
+                credentials: vec![], // vazia ⇒ descoberta por RP (resident key)
+                allow_list: None,
+                client_data_hash: b"test".to_vec(),
+                extensions: None,
+                options: ctap2::GetAssertionOptions::default(),
+                pin_uv_auth_param: None,
+                pin_protocol: None,
+                uv: None,
+            })
+            .expect("credencial deve sobreviver ao restart sob o gate");
+        let credential = assertion.credential.expect("assertion cita a credencial");
+        assert_eq!(credential.r#type, "public-key");
+        let user = assertion.user.expect("resident key carrega o usuário");
+        assert_eq!(user.id, b"user123".to_vec());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_multiprotocol_authenticator_holds_multiple_transports() {
+        let profile = DeviceProfileBuilder::new()
+            .transport_config(TransportConfig::usb_hid())
+            .add_transport(TransportConfig::usb_ccid())
+            .add_transport(TransportConfig::nfc())
+            .build();
+        let auth = EmbeddedAuthenticator::new_with_profile(profile).unwrap();
+        // Legado transport() deve ser o primeiro (HID).
+        assert!(auth.transport().is_some());
+        // Multi-protocolo: 3 ativos.
+        assert_eq!(auth.transports().len(), 3);
+        // O dispatcher MultiTransport agregaria os mesmos 3.
+        let mt = transports_from_profile(auth.profile());
+        assert_eq!(mt.len(), 3);
+    }
+
+    #[test]
+    fn test_multiprotocol_empty_profile_has_no_transport() {
+        let auth =
+            EmbeddedAuthenticator::new_with_profile(DeviceProfileBuilder::new().build()).unwrap();
+        assert!(auth.transport().is_none());
+        assert_eq!(auth.transports().len(), 0);
+    }
+}

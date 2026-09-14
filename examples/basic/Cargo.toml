@@ -1,0 +1,12 @@
+[package]
+name = "basic-example"
+version = "0.1.1"
+edition = "2021"
+description = "Basic FIDO2 authenticator example"
+license = "MIT"
+
+[dependencies]
+authenticator = { package = "openkey-device", path = "../../crates/openkey-device", version = "0.1.1" }
+board-generic = { package = "openkey-hal", path = "../../crates/openkey-hal", version = "0.1.1" }
+log = "0.4"
+env_logger = "0.11"

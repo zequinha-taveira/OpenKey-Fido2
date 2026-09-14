@@ -1,0 +1,20 @@
+[package]
+name = "test-suite"
+version = "0.1.1"
+edition = "2021"
+description = "Integration tests for openkey-fido2 protocols"
+license = "MIT"
+
+[dependencies]
+crypto = { package = "openkey-crypto", path = "../crates/openkey-crypto", version = "0.1.1" }
+storage = { package = "openkey-storage", path = "../crates/openkey-storage", version = "0.1.1" }
+ctap2 = { package = "openkey-core", path = "../crates/openkey-core", version = "0.1.1" }
+authenticator = { package = "openkey-device", path = "../crates/openkey-device", version = "0.1.1" }
+board-generic = { package = "openkey-hal", path = "../crates/openkey-hal", version = "0.1.1" }
+profile-generic = { package = "openkey-target-generic", path = "../targets/generic", version = "0.1.1" }
+profile-stm32 = { package = "openkey-target-stm32", path = "../targets/stm32", version = "0.1.1" }
+profile-rp2350 = { package = "rp2350-firmware", path = "../targets/rp2350", version = "0.1.1" }
+transport = { package = "openkey-transport", path = "../crates/openkey-transport", version = "0.1.1", features = ["embedded"] }
+embedded-hal = "1.0"
+ciborium = "0.2"
+rand = { workspace = true }

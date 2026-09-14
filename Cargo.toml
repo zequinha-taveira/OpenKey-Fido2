@@ -1,0 +1,73 @@
+[workspace]
+# OpenKey is split between MCU-independent crates and hardware targets. The
+# target crates may know a board; the core crates must not know an MCU.
+resolver = "2"
+members = [
+    "crates/openkey-core",
+    "crates/openkey-crypto",
+    "crates/openkey-storage",
+    "crates/openkey-transport",
+    "crates/openkey-hal",
+    "crates/openkey-device",
+    "targets/generic",
+    "targets/rp2040",
+    "targets/rp2350",
+    "targets/stm32",
+    "targets/simulator",
+    "examples/basic",
+    "examples/crypto",
+    "examples/ctap",
+    "examples/storage",
+    "examples/transport",
+    "examples/webauthn",
+    "tests",
+]
+
+[workspace.package]
+version = "0.1.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["openkey-fido2 contributors"]
+description = "FIDO2 Embedded Authenticator - Open-source FIDO2/WebAuthn authenticator for embedded devices"
+repository = "https://github.com/zequinha-taveira/openkey-fido2"
+readme = "README.md"
+keywords = ["fido2", "webauthn", "ctap2", "authenticator", "embedded", "security"]
+categories = ["embedded", "cryptography", "authentication"]
+rust-version = "1.85"
+
+[workspace.metadata.docs.rs]
+all-features = true
+
+[workspace.dependencies]
+ring = "0.17"
+log = "0.4"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
+ciborium = "0.2"
+zeroize = { version = "1.7", features = ["derive"] }
+rand = "0.8"
+x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets", "zeroize"] }
+aes = "0.9"
+cbc = "0.2"
+
+[profile.dev]
+opt-level = 2
+lto = true
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+strip = true
+lto = true
+debug = true
+panic = "abort"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+
+[patch.crates-io]
+# Ring vendido (patch de seleção de fontes para thumbv8m) em targets/rp2350.
+ring = { path = "targets/rp2350/vendor/ring" }

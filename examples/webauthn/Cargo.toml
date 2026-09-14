@@ -1,0 +1,17 @@
+[package]
+name = "webauthn-example"
+version = "0.1.1"
+edition = "2021"
+description = "Minimal example of WebAuthn registration and authentication via WebAuthnAuthenticator"
+license = "MIT"
+
+[dependencies]
+webauthn = { package = "openkey-core", path = "../../crates/openkey-core", version = "0.1.1" }
+crypto = { package = "openkey-crypto", path = "../../crates/openkey-crypto", version = "0.1.1" }
+storage = { package = "openkey-storage", path = "../../crates/openkey-storage", version = "0.1.1" }
+log = "0.4"
+env_logger = "0.11"
+
+[[bin]]
+name = "webauthn-example"
+path = "src/main.rs"

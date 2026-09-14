@@ -1,0 +1,17 @@
+[package]
+name = "openkey-hal"
+version.workspace = true
+edition.workspace = true
+description = "MCU-independent hardware abstraction contracts for OpenKey"
+license.workspace = true
+
+[lib]
+name = "board_generic"
+
+[dependencies]
+log.workspace = true
+embedded-hal = "1.0"
+nb = "1.0"
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "1.0"

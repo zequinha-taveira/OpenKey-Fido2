@@ -1,0 +1,17 @@
+[package]
+name = "fido2-simulator"
+version = "0.1.1"
+edition = "2021"
+description = "Host simulator exposing the FIDO2 firmware over a JSON line protocol (no hardware required)"
+license = "MIT"
+build = "build.rs"
+
+[dependencies]
+device = { package = "openkey-device", path = "../../crates/openkey-device", version = "0.1.1" }
+openkey-core = { package = "openkey-core", path = "../../crates/openkey-core", version = "0.1.1" }
+crypto = { package = "openkey-crypto", path = "../../crates/openkey-crypto", version = "0.1.1" }
+storage = { package = "openkey-storage", path = "../../crates/openkey-storage", version = "0.1.1" }
+transport = { package = "openkey-transport", path = "../../crates/openkey-transport", version = "0.1.1" }
+base64 = "0.23"
+ciborium = "0.2"
+serde_json = "1.0"

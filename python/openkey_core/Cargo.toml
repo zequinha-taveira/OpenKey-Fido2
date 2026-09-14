@@ -1,0 +1,20 @@
+[package]
+name = "openkey-python"
+version = "0.1.1"
+edition = "2021"
+description = "Extensão Python (pyo3) expondo o núcleo Rust FIDO2 como VirtualAuthenticator (módulo openkey_core)"
+license = "MIT"
+
+[lib]
+name = "openkey_core"
+crate-type = ["cdylib"]
+
+# Crate fora do workspace principal: `maturin` é o único build system usado aqui.
+# O mesmo núcleo (`core/authenticator`) compila para o firmware embarcado.
+[workspace]
+
+[dependencies]
+authenticator = { package = "openkey-device", path = "../../crates/openkey-device", version = "0.1.1" }
+board-generic = { package = "openkey-hal", path = "../../crates/openkey-hal", version = "0.1.1" }
+ctap2 = { package = "openkey-core", path = "../../crates/openkey-core", version = "0.1.1" }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }

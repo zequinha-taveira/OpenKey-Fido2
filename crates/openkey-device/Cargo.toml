@@ -1,0 +1,26 @@
+[package]
+name = "openkey-device"
+version.workspace = true
+edition.workspace = true
+description = "OpenKey product configuration and authenticator composition"
+license.workspace = true
+build = "build.rs"
+
+[lib]
+name = "device"
+
+[dependencies]
+openkey-core = { package = "openkey-core", path = "../openkey-core", version = "0.1.1", default-features = false }
+crypto = { package = "openkey-crypto", path = "../openkey-crypto", version = "0.1.1", default-features = false }
+storage = { package = "openkey-storage", path = "../openkey-storage", version = "0.1.1", default-features = false }
+transport = { package = "openkey-transport", path = "../openkey-transport", version = "0.1.1", default-features = false }
+board-generic = { package = "openkey-hal", path = "../openkey-hal", version = "0.1.1" }
+log.workspace = true
+ring.workspace = true
+zeroize.workspace = true
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+
+[features]
+default = ["rs256", "std"]
+rs256 = ["openkey-core/rs256", "crypto/rs256"]
+std = ["openkey-core/std", "crypto/std", "storage/std", "transport/std"]

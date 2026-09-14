@@ -1,0 +1,12 @@
+[package]
+name = "openkey-target-generic"
+version.workspace = true
+edition.workspace = true
+description = "Generic OpenKey target and board profile"
+license.workspace = true
+
+[lib]
+name = "target_generic"
+
+[dependencies]
+board-generic = { package = "openkey-hal", path = "../../crates/openkey-hal", version = "0.1.1" }

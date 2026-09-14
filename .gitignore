@@ -1,0 +1,53 @@
+# Rust / Cargo
+target/
+**/target/
+*.rs.bk
+
+# Embedded firmware outputs (outside target/)
+*.elf
+
+# Fuzzing (cargo-fuzz)
+fuzz/artifacts/
+fuzz/corpus/
+fuzz/coverage/
+
+# Code coverage (cargo-tarpaulin / llvm-cov)
+coverage/
+tarpaulin-report.html
+cobertura.xml
+lcov.info
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+*.whl
+.coverage
+htmlcov/
+
+# Build artifacts
+dist/
+
+# Secrets / signing keys (never commit)
+.env
+*.pem
+*.key
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

@@ -1,0 +1,38 @@
+[package]
+name = "openkey-crypto"
+version.workspace = true
+edition.workspace = true
+description = "Cryptographic operations for the OpenKey FIDO2 authenticator"
+license.workspace = true
+
+[lib]
+name = "crypto"
+
+[dependencies]
+log.workspace = true
+ring.workspace = true
+zeroize.workspace = true
+x25519-dalek.workspace = true
+aes.workspace = true
+cbc.workspace = true
+
+[dependencies.rsa]
+version = "0.9"
+features = ["sha2"]
+optional = true
+
+[dependencies.rand]
+workspace = true
+optional = true
+
+[dependencies.num-bigint-dig]
+version = "0.8"
+optional = true
+
+[target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
+getrandom = { version = "0.2", default-features = false, features = ["custom"] }
+
+[features]
+default = ["rs256", "std"]
+std = []
+rs256 = ["dep:rsa", "dep:rand", "dep:num-bigint-dig"]

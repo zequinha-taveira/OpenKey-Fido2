@@ -1,0 +1,48 @@
+[package]
+name = "openkey-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Fuzz targets para CTAP2 e CTAPHID (cargo-fuzz)"
+license = "MIT OR Apache-2.0"
+
+# Crate fora do workspace principal: `cargo-fuzz` gerencia seu proprio build
+# (sanitizers, RUSTFLAGS e perfil release com debug-assertions).
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ctap2 = { package = "openkey-core", path = "../crates/openkey-core", version = "0.1.1" }
+crypto = { package = "openkey-crypto", path = "../crates/openkey-crypto", version = "0.1.1" }
+storage = { package = "openkey-storage", path = "../crates/openkey-storage", version = "0.1.1" }
+transport = { package = "openkey-transport", path = "../crates/openkey-transport", version = "0.1.1" }
+ciborium = "0.2"
+
+[profile.release]
+debug = 1
+debug-assertions = true
+overflow-checks = true
+
+[[bin]]
+name = "decode_cbor"
+path = "fuzz_targets/decode_cbor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctap2_dispatch"
+path = "fuzz_targets/ctap2_dispatch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctaphid_framing"
+path = "fuzz_targets/ctaphid_framing.rs"
+test = false
+doc = false
+bench = false

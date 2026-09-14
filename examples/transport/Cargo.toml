@@ -1,0 +1,15 @@
+[package]
+name = "transport-example"
+version = "0.1.1"
+edition = "2021"
+description = "Example of implementing a custom Transport trait"
+license = "MIT"
+
+[dependencies]
+transport = { package = "openkey-transport", path = "../../crates/openkey-transport", version = "0.1.1" }
+log = "0.4"
+env_logger = "0.11"
+
+[[bin]]
+name = "transport-example"
+path = "src/main.rs"

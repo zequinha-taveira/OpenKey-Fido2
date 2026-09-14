@@ -1,0 +1,12 @@
+[package]
+name = "openkey-target-stm32"
+version.workspace = true
+edition.workspace = true
+description = "STM32 target profile for OpenKey"
+license.workspace = true
+
+[lib]
+name = "target_stm32"
+
+[dependencies]
+board-generic = { package = "openkey-hal", path = "../../crates/openkey-hal", version = "0.1.1" }

@@ -1,0 +1,801 @@
+use alloc::boxed::Box;
+use alloc::{format, vec, vec::Vec};
+use core::fmt::Debug;
+use core::num::NonZeroU32;
+#[cfg(feature = "rs256")]
+use num_bigint_dig::BigUint;
+use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
+use ring::digest;
+use ring::hmac;
+use ring::pbkdf2;
+use ring::rand::{SecureRandom, SystemRandom};
+#[cfg(feature = "rs256")]
+use ring::signature::RsaKeyPair;
+use ring::signature::{
+    EcdsaKeyPair, Ed25519KeyPair, KeyPair, UnparsedPublicKey, ECDSA_P256_SHA256_ASN1,
+    ECDSA_P256_SHA256_ASN1_SIGNING, ECDSA_P384_SHA384_ASN1, ECDSA_P384_SHA384_ASN1_SIGNING,
+    ED25519,
+};
+#[cfg(feature = "rs256")]
+use ring::signature::{
+    RSA_PKCS1_2048_8192_SHA256, RSA_PKCS1_SHA256, RSA_PSS_2048_8192_SHA256, RSA_PSS_SHA256,
+};
+#[cfg(feature = "rs256")]
+use rsa::pkcs1::{DecodeRsaPublicKey, EncodeRsaPublicKey};
+#[cfg(feature = "rs256")]
+use rsa::pkcs8::EncodePrivateKey;
+#[cfg(feature = "rs256")]
+use rsa::traits::PublicKeyParts;
+#[cfg(feature = "rs256")]
+use rsa::{RsaPrivateKey, RsaPublicKey};
+
+extern crate alloc;
+
+/// RSA modulus size used for RS256 credentials.
+#[cfg(feature = "rs256")]
+const RSA_KEY_BITS: usize = 2048;
+
+/// RSA key pair material: (PKCS#8 private key, modulus `n`, exponent `e`).
+#[cfg(feature = "rs256")]
+pub type RsaKeyMaterial = (Vec<u8>, Vec<u8>, Vec<u8>);
+
+/// Motor criptográfico do autenticador.
+///
+/// Mantém uma chave-mestra de 32 bytes usada para encryption at rest
+/// (ChaCha20-Poly1305) e derivação de chaves. A chave nunca é exposta:
+/// a implementação de [`Debug`] a substitui por `[redacted]` para evitar
+/// vazamento acidental em logs.
+pub struct CryptoEngine {
+    key: [u8; 32],
+}
+
+impl Clone for CryptoEngine {
+    fn clone(&self) -> Self {
+        Self { key: self.key }
+    }
+}
+
+fn ed25519_key_pair_from_seed(seed: &[u8]) -> Result<Ed25519KeyPair, Box<dyn core::error::Error>> {
+    if seed.len() != 32 {
+        return Err("Ed25519 private key must be 32 bytes".into());
+    }
+    Ed25519KeyPair::from_seed_unchecked(seed)
+        .map_err(|e| format!("Invalid Ed25519 private key: {:?}", e).into())
+}
+
+impl CryptoEngine {
+    /// Cria um motor com chave-mestra aleatória obtida de `SystemRandom`.
+    ///
+    /// Cada instância gera uma chave nova: credenciais cifradas por um motor
+    /// não são legíveis por outro. Use [`CryptoEngine::from_key`] quando a
+    /// chave precisar sobreviver a reinícios (storage persistente).
+    pub fn new() -> Result<Self, Box<dyn core::error::Error>> {
+        let rng = SystemRandom::new();
+        let mut key = [0u8; 32];
+        rng.fill(&mut key)
+            .map_err(|e| format!("Failed to generate engine key: {:?}", e))?;
+
+        log::info!("Crypto engine initialized");
+        Ok(Self { key })
+    }
+
+    /// Cria um motor a partir de uma chave-mestra existente.
+    ///
+    /// Necessário para storage persistente: sem reusar a chave, os dados
+    /// cifrados em execuções anteriores tornam-se indecifráveis.
+    pub fn from_key(key: [u8; 32]) -> Self {
+        log::info!("Crypto engine initialized with provided key");
+        Self { key }
+    }
+
+    /// Deriva uma subchave de 32 bytes a partir da chave-mestra.
+    ///
+    /// Evita reutilizar a chave-mestra diretamente em contextos distintos;
+    /// `salt` e `iterations` compõem o domínio de separação.
+    pub fn derive_key(
+        &self,
+        salt: &[u8],
+        iterations: u32,
+    ) -> Result<Vec<u8>, Box<dyn core::error::Error>> {
+        let key = hmac::Key::new(hmac::HMAC_SHA256, &self.key);
+        let mut ctx = hmac::Context::with_key(&key);
+        ctx.update(salt);
+        ctx.update(&iterations.to_be_bytes());
+        Ok(ctx.sign().as_ref().to_vec())
+    }
+
+    /// Calcula HMAC-SHA256 de `data` usando `key_id` como chave.
+    pub fn compute_hmac(
+        &self,
+        data: &[u8],
+        key_id: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn core::error::Error>> {
+        let key = hmac::Key::new(hmac::HMAC_SHA256, key_id);
+        let tag = hmac::sign(&key, data);
+        Ok(tag.as_ref().to_vec())
+    }
+
+    /// Calcula HMAC-SHA512 de `data` usando `key` como chave.
+    ///
+    /// Usado pela aplicação Yubico OATH (YKOATH) para credenciais com
+    /// algoritmo HMAC-SHA512 (byte de algoritmo 0x03).
+    pub fn compute_hmac_sha512(
+        &self,
+        data: &[u8],
+        key: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn core::error::Error>> {
+        let key = hmac::Key::new(hmac::HMAC_SHA512, key);
+        let tag = hmac::sign(&key, data);
+        Ok(tag.as_ref().to_vec())
+    }
+
+    /// Calcula HMAC-SHA1 de `data` usando `key` como chave.
+    ///
+    /// **Uso restrito à compatibilidade YKOATH**: o protocolo Yubico OATH
+    /// deriva a chave de acesso com PBKDF2-HMAC-SHA1 e valida sessões com
+    /// HMAC-SHA1 (`yubikit.oath._hmac_sha1`); sem SHA-1 não há interoperação
+    /// com as ferramentas oficiais da Yubico. SHA-1 permanece seguro no
+    /// papel de MAC-HMAC neste contexto, mas **não** deve ser usado fora
+    /// deste módulo — preferir [`CryptoEngine::compute_hmac`] (SHA-256).
+    pub fn compute_hmac_sha1_ykoath_compat(
+        &self,
+        data: &[u8],
+        key: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn core::error::Error>> {
+        let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, key);
+        let tag = hmac::sign(&key, data);
+        Ok(tag.as_ref().to_vec())
+    }
+
+    /// Deriva bytes via PBKDF2-HMAC-SHA1 (compatibilidade YKOATH).
+    ///
+    /// O protocolo YKOATH define a chave de acesso como as primeiras 16
+    /// bytes de `PBKDF2-HMAC-SHA1(senha, salt = ID do dispositivo,
+    /// 1000 iterações)` (`yubikit.oath._derive_key`). A função é associada
+    /// (não usa a chave-mestra) e existe apenas para esse derivador;
+    /// novos desenhos devem preferir PBKDF2 com SHA-256 ou superior.
+    ///
+    /// Retorna erro quando `iterations` é zero ou excede `u32::MAX`.
+    pub fn derive_pbkdf2_sha1_ykoath_compat(
+        password: &[u8],
+        salt: &[u8],
+        iterations: u32,
+        out_len: usize,
+    ) -> Result<Vec<u8>, Box<dyn core::error::Error>> {
+        let iterations =
+            NonZeroU32::new(iterations).ok_or("PBKDF2 requires a non-zero iteration count")?;
+        let mut out = vec![0u8; out_len];
+        pbkdf2::derive(
+            pbkdf2::PBKDF2_HMAC_SHA1,
+            iterations,
+            salt,
+            password,
+            &mut out,
+        );
+        Ok(out)
+    }
+
+    /// Verifica um HMAC-SHA256 em tempo constante.
+    ///
+    /// Retorna `Err` (em vez de `Ok(false)`) quando o MAC não confere, para
+    /// que o chamador não trate silenciosamente uma falha de autenticação.
+    pub fn verify_hmac(
+        &self,
+        data: &[u8],
+        mac_data: &[u8],
+        key_id: &[u8],
+    ) -> Result<bool, Box<dyn core::error::Error>> {
+        let key = hmac::Key::new(hmac::HMAC_SHA256, key_id);
+        hmac::verify(&key, data, mac_data)
+            .map(|_| true)
+            .map_err(|e| format!("HMAC verification failed: {:?}", e).into())
+    }
+
+    /// Calcula SHA-256 de `data`. Usado para `rpIdHash` no authData CTAP2.
+    pub fn sha256(&self, data: &[u8]) -> Vec<u8> {
+        digest::digest(&digest::SHA256, data).as_ref().to_vec()
+    }
+
+    /// Gera `len` bytes aleatórios via `SystemRandom` (CSPRNG do SO).
+    ///
+    /// # Panics
+    ///
+    /// Entra em pânico se o RNG do sistema falhar — continuar com entropia
+    /// degradada comprometeria nonces e credential IDs.
+    pub fn random_bytes(&self, len: usize) -> Vec<u8> {
+        let rng = SystemRandom::new();
+        let mut buf = vec![0u8; len];
+        rng.fill(&mut buf)
+            .expect("SystemRandom failed to generate random bytes");
+        buf
+    }
+
+    /// Gera um par de chaves Ed25519 (EdDSA, alg -8), o algoritmo padrão.
+    ///
+    /// Retorna `(seed de 32 bytes, chave pública de 32 bytes)`. A seed é
+    /// armazenada em vez do PKCS#8 por ocupar menos espaço em flash.
+    pub fn generate_key_pair(&self) -> Result<(Vec<u8>, Vec<u8>), Box<dyn core::error::Error>> {
+        let rng = SystemRandom::new();
+        let mut seed = [0u8; 32];
+        rng.fill(&mut seed)
+            .map_err(|e| format!("Failed to generate key pair seed: {:?}", e))?;
+        let key_pair = ed25519_key_pair_from_seed(&seed)?;
+        let public_key = key_pair.public_key().as_ref().to_vec();
+        Ok((seed.to_vec(), public_key))
+    }
+
+    /// Generate a P-256 key pair, returning (PKCS#8 private key, raw public key).
+    /// The public key is 65 bytes: 0x04 + x (32 bytes) + y (32 bytes).
+    pub fn generate_p256_key_pair(
+        &self,
+    ) -> Result<(Vec<u8>, Vec<u8>), Box<dyn core::error::Error>> {
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng)
+            .map_err(|e| format!("Failed to generate P-256 PKCS#8: {:?}", e))?;
+        let key_pair =
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng)
+                .map_err(|e| format!("Failed to parse P-256 PKCS#8: {:?}", e))?;
+        let public_key = key_pair.public_key().as_ref().to_vec();
+        Ok((pkcs8.as_ref().to_vec(), public_key))
+    }
+
+    /// Sign with P-256, returning a DER-encoded signature.
+    pub fn sign_p256(
+        &self,
+        private_key: &[u8],
+        message: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn core::error::Error>> {
+        let rng = SystemRandom::new();
+        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, private_key, &rng)
+            .map_err(|e| format!("Failed to parse P-256 private key: {:?}", e))?;
+        let signature = key_pair
+            .sign(&rng, message)
+            .map_err(|e| format!("P-256 signing failed: {:?}", e))?;
+        Ok(signature.as_ref().to_vec())
+    }
+
+    /// Verify a P-256 DER-encoded signature.
+    pub fn verify_p256(
+        &self,
+        public_key: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), Box<dyn core::error::Error>> {
+        let verifying_key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, public_key);
+        verifying_key
+            .verify(message, signature)
+            .map_err(|e| format!("P-256 verification failed: {:?}", e).into())
+    }
+
+    /// Generate a P-384 key pair (ES384 / alg -35), returning (PKCS#8 private key, raw public key).
+    /// The public key is 97 bytes: 0x04 + x (48 bytes) + y (48 bytes).
+    pub fn generate_p384_key_pair(
+        &self,
+    ) -> Result<(Vec<u8>, Vec<u8>), Box<dyn core::error::Error>> {
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P384_SHA384_ASN1_SIGNING, &rng)
+            .map_err(|e| format!("Failed to generate P-384 PKCS#8: {:?}", e))?;
+        let key_pair =
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P384_SHA384_ASN1_SIGNING, pkcs8.as_ref(), &rng)
+                .map_err(|e| format!("Failed to parse P-384 PKCS#8: {:?}", e))?;
+        let public_key = key_pair.public_key().as_ref().to_vec();
+        Ok((pkcs8.as_ref().to_vec(), public_key))
+    }
+
+    /// Sign with P-384 over SHA-384 (ES384 / alg -35), returning a DER-encoded signature.
+    pub fn sign_p384(
+        &self,
+        private_key: &[u8],
+        message: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn core::error::Error>> {
+        let rng = SystemRandom::new();
+        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P384_SHA384_ASN1_SIGNING, private_key, &rng)
+            .map_err(|e| format!("Failed to parse P-384 private key: {:?}", e))?;
+        let signature = key_pair
+            .sign(&rng, message)
+            .map_err(|e| format!("P-384 signing failed: {:?}", e))?;
+        Ok(signature.as_ref().to_vec())
+    }
+
+    /// Verify a P-384 DER-encoded signature (ES384 / alg -35).
+    pub fn verify_p384(
+        &self,
+        public_key: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), Box<dyn core::error::Error>> {
+        let verifying_key = UnparsedPublicKey::new(&ECDSA_P384_SHA384_ASN1, public_key);
+        verifying_key
+            .verify(message, signature)
+            .map_err(|e| format!("P-384 verification failed: {:?}", e).into())
+    }
+
+    /// Sign with RSA-PSS over SHA-256 (PS256 / alg -37).
+    #[cfg(feature = "rs256")]
+    pub fn sign_rsa_pss(
+        &self,
+        private_key: &[u8],
+        message: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn core::error::Error>> {
+        let key_pair = RsaKeyPair::from_pkcs8(private_key)
+            .map_err(|e| format!("Failed to parse RSA private key: {:?}", e))?;
+        let rng = SystemRandom::new();
+        let mut signature = vec![0u8; key_pair.public().modulus_len()];
+        key_pair
+            .sign(&RSA_PSS_SHA256, &rng, message, &mut signature)
+            .map_err(|e| format!("RSA-PSS signing failed: {:?}", e))?;
+        Ok(signature)
+    }
+
+    /// Verify a PS256 signature against a DER SubjectPublicKeyInfo public key.
+    #[cfg(feature = "rs256")]
+    pub fn verify_rsa_pss(
+        &self,
+        public_key: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), Box<dyn core::error::Error>> {
+        let verifying_key = UnparsedPublicKey::new(&RSA_PSS_2048_8192_SHA256, public_key);
+        verifying_key
+            .verify(message, signature)
+            .map_err(|e| format!("RSA-PSS verification failed: {:?}", e).into())
+    }
+
+    /// Generate an RSA-2048 key pair for RS256 (alg -257).
+    /// Returns (PKCS#8 private key, modulus `n` big-endian, exponent `e` big-endian).
+    #[cfg(feature = "rs256")]
+    pub fn generate_rsa_key_pair(&self) -> Result<RsaKeyMaterial, Box<dyn core::error::Error>> {
+        let mut rng = rand::rngs::OsRng;
+        let private_key = RsaPrivateKey::new(&mut rng, RSA_KEY_BITS)
+            .map_err(|e| format!("RSA key generation failed: {:?}", e))?;
+        let public_key = RsaPublicKey::from(&private_key);
+        let pkcs8 = private_key
+            .to_pkcs8_der()
+            .map_err(|e| format!("RSA PKCS#8 encoding failed: {:?}", e))?
+            .as_bytes()
+            .to_vec();
+        let n = public_key.n().to_bytes_be();
+        let e = public_key.e().to_bytes_be();
+        Ok((pkcs8, n, e))
+    }
+
+    /// Encode an RSA public key (`n`, `e` big-endian) as a DER `RSAPublicKey`
+    /// (PKCS#1), the format expected by `ring` for RSA verification.
+    #[cfg(feature = "rs256")]
+    pub fn rsa_public_key_der(n: &[u8], e: &[u8]) -> Result<Vec<u8>, Box<dyn core::error::Error>> {
+        let public_key = RsaPublicKey::new(BigUint::from_bytes_be(n), BigUint::from_bytes_be(e))
+            .map_err(|e| format!("Invalid RSA public key: {:?}", e))?;
+        let der = public_key
+            .to_pkcs1_der()
+            .map_err(|e| format!("RSA public key encoding failed: {:?}", e))?
+            .as_bytes()
+            .to_vec();
+        Ok(der)
+    }
+
+    /// Extract (`n`, `e`) big-endian components from a DER `RSAPublicKey`.
+    #[cfg(feature = "rs256")]
+    pub fn rsa_public_key_parts(
+        public_key_der: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), Box<dyn core::error::Error>> {
+        let public_key = RsaPublicKey::from_pkcs1_der(public_key_der)
+            .map_err(|e| format!("Invalid RSA public key DER: {:?}", e))?;
+        Ok((public_key.n().to_bytes_be(), public_key.e().to_bytes_be()))
+    }
+
+    /// Sign with RSA PKCS#1 v1.5 over SHA-256 (RS256).
+    #[cfg(feature = "rs256")]
+    pub fn sign_rsa(
+        &self,
+        private_key: &[u8],
+        message: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn core::error::Error>> {
+        let key_pair = RsaKeyPair::from_pkcs8(private_key)
+            .map_err(|e| format!("Failed to parse RSA private key: {:?}", e))?;
+        let rng = SystemRandom::new();
+        let mut signature = vec![0u8; key_pair.public().modulus_len()];
+        key_pair
+            .sign(&RSA_PKCS1_SHA256, &rng, message, &mut signature)
+            .map_err(|e| format!("RSA signing failed: {:?}", e))?;
+        Ok(signature)
+    }
+
+    /// Verify an RS256 signature against a DER SubjectPublicKeyInfo public key.
+    #[cfg(feature = "rs256")]
+    pub fn verify_rsa(
+        &self,
+        public_key: &[u8],
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<(), Box<dyn core::error::Error>> {
+        let verifying_key = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, public_key);
+        verifying_key
+            .verify(message, signature)
+            .map_err(|e| format!("RSA verification failed: {:?}", e).into())
+    }
+
+    /// Assina `data` com Ed25519, a partir da seed de 32 bytes.
+    pub fn sign(
+        &self,
+        data: &[u8],
+        private_key: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn core::error::Error>> {
+        let key_pair = ed25519_key_pair_from_seed(private_key)?;
+        Ok(key_pair.sign(data).as_ref().to_vec())
+    }
+
+    /// Verifica uma assinatura Ed25519. Retorna `Err` quando inválida.
+    pub fn verify(
+        &self,
+        data: &[u8],
+        signature: &[u8],
+        public_key: &[u8],
+    ) -> Result<bool, Box<dyn core::error::Error>> {
+        let verifying_key = UnparsedPublicKey::new(&ED25519, public_key);
+        verifying_key
+            .verify(data, signature)
+            .map(|_| true)
+            .map_err(|e| format!("Signature verification failed: {:?}", e).into())
+    }
+
+    /// Cifra `plaintext` com ChaCha20-Poly1305 usando a chave-mestra.
+    ///
+    /// O `nonce` deve ter exatamente 12 bytes e **nunca** ser reutilizado com
+    /// a mesma chave — use [`CryptoEngine::random_bytes`] para gerá-lo.
+    /// A saída inclui a tag de autenticação de 16 bytes ao final.
+    pub fn encrypt(
+        &self,
+        plaintext: &[u8],
+        nonce: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn core::error::Error>> {
+        let unbound = UnboundKey::new(&CHACHA20_POLY1305, &self.key)
+            .map_err(|e| format!("Failed to create cipher key: {:?}", e))?;
+        let key = LessSafeKey::new(unbound);
+        let nonce = Nonce::assume_unique_for_key(
+            nonce
+                .try_into()
+                .map_err(|_| "Nonce must be exactly 12 bytes")?,
+        );
+        let mut in_out = plaintext.to_vec();
+        key.seal_in_place_append_tag(nonce, Aad::empty(), &mut in_out)
+            .map_err(|e| format!("Encryption failed: {:?}", e))?;
+        Ok(in_out)
+    }
+
+    /// Cifra dados com nonce aleatório e retorna `(nonce, ciphertext)`.
+    /// O nonce deve ser persistido junto do ciphertext e nunca reutilizado.
+    pub fn encrypt_with_random_nonce(
+        &self,
+        plaintext: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), Box<dyn core::error::Error>> {
+        let nonce = self.random_bytes(12);
+        let ciphertext = self.encrypt(plaintext, &nonce)?;
+        Ok((nonce, ciphertext))
+    }
+
+    /// Decifra dados produzidos por [`CryptoEngine::encrypt`].
+    ///
+    /// Falha se a tag de autenticação não conferir (dado adulterado) ou se a
+    /// chave-mestra for diferente da usada na cifragem.
+    pub fn decrypt(
+        &self,
+        ciphertext: &[u8],
+        nonce: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn core::error::Error>> {
+        let unbound = UnboundKey::new(&CHACHA20_POLY1305, &self.key)
+            .map_err(|e| format!("Failed to create cipher key: {:?}", e))?;
+        let key = LessSafeKey::new(unbound);
+        let nonce = Nonce::assume_unique_for_key(
+            nonce
+                .try_into()
+                .map_err(|_| "Nonce must be exactly 12 bytes")?,
+        );
+        let mut in_out = ciphertext.to_vec();
+        let plaintext = key
+            .open_in_place(nonce, Aad::empty(), &mut in_out)
+            .map_err(|e| format!("Decryption failed: {:?}", e))?;
+        Ok(plaintext.to_vec())
+    }
+
+    /// Gera um par de chaves X25519 estático persistível `(private_key_32B, public_key_32B)`.
+    pub fn generate_x25519_key_pair(
+        &self,
+    ) -> Result<(Vec<u8>, Vec<u8>), Box<dyn core::error::Error>> {
+        let (priv_k, pub_k) = crate::hybrid::hybrid_generate_static_keypair()?;
+        Ok((priv_k.to_vec(), pub_k.to_vec()))
+    }
+
+    /// Executa Diffie-Hellman X25519 entre a chave privada local e a pública do par.
+    pub fn x25519_diffie_hellman(
+        &self,
+        private_key: &[u8],
+        public_key: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn core::error::Error>> {
+        let shared = crate::hybrid::hybrid_diffie_hellman(private_key, public_key)?;
+        Ok(shared.to_vec())
+    }
+
+    /// Cifra dados usando ECIES híbrido (X25519 efêmero + HKDF + ChaCha20-Poly1305)
+    /// direcionado à chave pública do destinatário.
+    pub fn hybrid_encrypt(
+        &self,
+        recipient_public_key: &[u8],
+        plaintext: &[u8],
+    ) -> Result<crate::hybrid::HybridCiphertext, Box<dyn core::error::Error>> {
+        crate::hybrid::hybrid_encrypt(recipient_public_key, plaintext)
+    }
+
+    /// Decifra dados ECIES híbridos usando uma chave privada X25519 estática.
+    pub fn hybrid_decrypt_static(
+        &self,
+        recipient_private_key: &[u8],
+        recipient_public_key: &[u8],
+        ciphertext: &crate::hybrid::HybridCiphertext,
+    ) -> Result<Vec<u8>, Box<dyn core::error::Error>> {
+        crate::hybrid::hybrid_decrypt_static(
+            recipient_private_key,
+            recipient_public_key,
+            ciphertext,
+        )
+    }
+}
+
+impl Debug for CryptoEngine {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CryptoEngine")
+            .field("key", &"[redacted]")
+            .finish()
+    }
+}
+
+impl Default for CryptoEngine {
+    fn default() -> Self {
+        Self::new().expect("Failed to initialize default CryptoEngine")
+    }
+}
+
+/// Compares two byte slices in constant time.
+///
+/// Delegates to `ring::constant_time::verify_slices_are_equal` (BoringSSL
+/// `CRYPTO_memcmp`) so the comparison of equal-length slices runs in time
+/// independent of content, suitable for PIN hashes and auth tokens. Length
+/// mismatch returns `false` (length is not considered secret for fixed-size
+/// hashes/tokens used in this crate).
+#[allow(deprecated)]
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    ring::constant_time::verify_slices_are_equal(a, b).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Os testes RS256/PS256 exigem a feature `rs256`: a geração de chaves RSA
+    // depende de rsa/rand, indisponível em alvos bare-metal.
+    #[test]
+    #[cfg(all(test, feature = "rs256"))]
+    fn test_generate_rsa_key_pair() {
+        let engine = CryptoEngine::new().unwrap();
+        let (pkcs8, n, e) = engine.generate_rsa_key_pair().unwrap();
+
+        assert!(!pkcs8.is_empty());
+        assert_eq!(n.len(), RSA_KEY_BITS / 8);
+        assert!(!e.is_empty());
+        assert!(e.len() <= 3);
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "rs256"))]
+    fn test_rsa_sign_verify() {
+        let engine = CryptoEngine::new().unwrap();
+        let (pkcs8, n, e) = engine.generate_rsa_key_pair().unwrap();
+        let pub_der = CryptoEngine::rsa_public_key_der(&n, &e).unwrap();
+
+        let message = b"openkey rs256 test message";
+        let signature = engine.sign_rsa(&pkcs8, message).unwrap();
+        assert_eq!(signature.len(), RSA_KEY_BITS / 8);
+
+        engine.verify_rsa(&pub_der, message, &signature).unwrap();
+
+        let mut tampered = signature.clone();
+        tampered[0] ^= 0xFF;
+        assert!(engine.verify_rsa(&pub_der, message, &tampered).is_err());
+        assert!(engine
+            .verify_rsa(&pub_der, b"other message", &signature)
+            .is_err());
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "rs256"))]
+    fn test_rsa_public_key_der_roundtrip() {
+        let engine = CryptoEngine::new().unwrap();
+        let (_, n, e) = engine.generate_rsa_key_pair().unwrap();
+        let pub_der = CryptoEngine::rsa_public_key_der(&n, &e).unwrap();
+        let (n2, e2) = CryptoEngine::rsa_public_key_parts(&pub_der).unwrap();
+
+        assert_eq!(n, n2);
+        assert_eq!(e, e2);
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+        assert!(!constant_time_eq(b"hello", b"world"));
+        assert!(!constant_time_eq(b"hello", b"hell"));
+        assert!(!constant_time_eq(b"hell", b"hello"));
+        assert!(constant_time_eq(b"", b""));
+        assert!(!constant_time_eq(b"a", b""));
+
+        let mut a = vec![0u8; 32];
+        let mut b = vec![0u8; 32];
+        assert!(constant_time_eq(&a, &b));
+
+        a[0] = 0x01;
+        assert!(!constant_time_eq(&a, &b));
+
+        b[0] = 0x01;
+        b[31] = 0xFF;
+        assert!(!constant_time_eq(&a, &b));
+    }
+
+    #[test]
+    fn test_hmac_sha512_rfc4231_case1() {
+        let engine = CryptoEngine::new().unwrap();
+        let key = [0x0bu8; 20];
+        let data = b"Hi There";
+        // RFC 4231 §4.2, test case 1.
+        let expected: Vec<u8> = [
+            "87aa7cdea5ef619d4ff0b4241a1d6cb0",
+            "2379f4e2ce4ec2787ad0b30545e17cde",
+            "daa833b7d6b8a702038b274eaea3f4e4",
+            "be9d914eeb61f1702e696c203a126854",
+        ]
+        .concat()
+        .as_bytes()
+        .chunks(2)
+        .map(|h| u8::from_str_radix(std::str::from_utf8(h).unwrap(), 16).unwrap())
+        .collect();
+        let mac = engine.compute_hmac_sha512(data, &key).unwrap();
+        assert_eq!(mac, expected);
+    }
+
+    #[test]
+    fn test_hmac_sha512_rfc4231_case2() {
+        let engine = CryptoEngine::new().unwrap();
+        let key = b"Jefe";
+        let data = b"what do ya want for nothing?";
+        // RFC 4231 §4.3, test case 2.
+        let expected: Vec<u8> = [
+            "164b7a7bfcf819e2e395fbe73b56e0a3",
+            "87bd64222e831fd610270cd7ea250554",
+            "9758bf75c05a994a6d034f65f8f0e6fd",
+            "caeab1a34d4a6b4b636e070a38bce737",
+        ]
+        .concat()
+        .as_bytes()
+        .chunks(2)
+        .map(|h| u8::from_str_radix(std::str::from_utf8(h).unwrap(), 16).unwrap())
+        .collect();
+        let mac = engine.compute_hmac_sha512(data, key).unwrap();
+        assert_eq!(mac, expected);
+    }
+
+    #[test]
+    fn test_hmac_sha1_ykoath_compat_rfc2202_case1() {
+        let engine = CryptoEngine::new().unwrap();
+        let key = [0x0bu8; 20];
+        // RFC 2202 §3, test case 1 para HMAC-SHA1.
+        let expected: Vec<u8> = "b617318655057264e28bc0b6fb378c8ef146be00"
+            .as_bytes()
+            .chunks(2)
+            .map(|h| u8::from_str_radix(std::str::from_utf8(h).unwrap(), 16).unwrap())
+            .collect();
+        let mac = engine
+            .compute_hmac_sha1_ykoath_compat(b"Hi There", &key)
+            .unwrap();
+        assert_eq!(mac, expected);
+    }
+
+    #[test]
+    fn test_pbkdf2_sha1_ykoath_compat_vectors() {
+        // Vetores PBKDF2-HMAC-SHA1 (mesmos de RFC 6070, aplicáveis ao PRF
+        // SHA-1 usado pelo derivador de chave de acesso YKOATH).
+        for (iterations, dk_len, expected_hex) in [
+            (1u32, 20usize, "0c60c80f961f0e71f3a9b524af6012062fe037a6"),
+            (2, 20, "ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957"),
+            (4096, 20, "4b007901b765489abead49d926f721d065a429c1"),
+        ] {
+            let derived = CryptoEngine::derive_pbkdf2_sha1_ykoath_compat(
+                b"password",
+                b"salt",
+                iterations,
+                dk_len,
+            )
+            .unwrap();
+            let expected: Vec<u8> = expected_hex
+                .as_bytes()
+                .chunks(2)
+                .map(|h| u8::from_str_radix(std::str::from_utf8(h).unwrap(), 16).unwrap())
+                .collect();
+            assert_eq!(derived, expected, "iterations={}", iterations);
+        }
+    }
+
+    #[test]
+    fn test_pbkdf2_sha1_ykoath_compat_rejects_zero_iterations() {
+        assert!(
+            CryptoEngine::derive_pbkdf2_sha1_ykoath_compat(b"password", b"salt", 0, 16).is_err()
+        );
+    }
+
+    #[test]
+    fn test_random_nonce_encrypt_roundtrip_and_uniqueness() {
+        let engine = CryptoEngine::new().unwrap();
+        let plaintext = b"client pin regression test";
+        let (nonce_a, ciphertext_a) = engine.encrypt_with_random_nonce(plaintext).unwrap();
+        let (nonce_b, ciphertext_b) = engine.encrypt_with_random_nonce(plaintext).unwrap();
+
+        assert_eq!(nonce_a.len(), 12);
+        assert_eq!(nonce_b.len(), 12);
+        assert_ne!(nonce_a, nonce_b);
+        assert_ne!(ciphertext_a, ciphertext_b);
+        assert_eq!(engine.decrypt(&ciphertext_a, &nonce_a).unwrap(), plaintext);
+        assert_eq!(engine.decrypt(&ciphertext_b, &nonce_b).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn test_es384_sign_verify() {
+        let engine = CryptoEngine::new().unwrap();
+        let (pkcs8, public_key) = engine.generate_p384_key_pair().unwrap();
+        assert_eq!(public_key.len(), 97); // 0x04 + 48 + 48
+
+        let message = b"test message for es384 ecdsa p384";
+        let signature = engine.sign_p384(&pkcs8, message).unwrap();
+        assert!(!signature.is_empty());
+
+        assert!(engine.verify_p384(&public_key, message, &signature).is_ok());
+
+        let mut bad_sig = signature.clone();
+        bad_sig[0] ^= 0xFF;
+        assert!(engine.verify_p384(&public_key, message, &bad_sig).is_err());
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "rs256"))]
+    fn test_ps256_sign_verify() {
+        let engine = CryptoEngine::new().unwrap();
+        let (pkcs8, n, e) = engine.generate_rsa_key_pair().unwrap();
+        let pub_der = CryptoEngine::rsa_public_key_der(&n, &e).unwrap();
+
+        let message = b"test message for ps256 rsa-pss";
+        let signature = engine.sign_rsa_pss(&pkcs8, message).unwrap();
+        assert_eq!(signature.len(), RSA_KEY_BITS / 8);
+
+        assert!(engine.verify_rsa_pss(&pub_der, message, &signature).is_ok());
+
+        let mut bad_sig = signature.clone();
+        bad_sig[0] ^= 0xFF;
+        assert!(engine.verify_rsa_pss(&pub_der, message, &bad_sig).is_err());
+    }
+
+    #[test]
+    fn test_x25519_static_hybrid_crypto_engine() {
+        let engine = CryptoEngine::new().unwrap();
+        let (priv_a, pub_a) = engine.generate_x25519_key_pair().unwrap();
+        let (priv_b, pub_b) = engine.generate_x25519_key_pair().unwrap();
+
+        assert_eq!(priv_a.len(), 32);
+        assert_eq!(pub_a.len(), 32);
+
+        // DH
+        let shared_ab = engine.x25519_diffie_hellman(&priv_a, &pub_b).unwrap();
+        let shared_ba = engine.x25519_diffie_hellman(&priv_b, &pub_a).unwrap();
+        assert_eq!(shared_ab, shared_ba);
+
+        // ECIES Static
+        let plaintext = b"persisted sealed secret for device reboots";
+        let ct = engine.hybrid_encrypt(&pub_a, plaintext).unwrap();
+        let decrypted = engine.hybrid_decrypt_static(&priv_a, &pub_a, &ct).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+}

@@ -1,0 +1,21 @@
+[package]
+name = "openkey-transport"
+version.workspace = true
+edition.workspace = true
+description = "USB, CCID, NFC, BLE, and CTAPHID transport implementations"
+license.workspace = true
+
+[lib]
+name = "transport"
+
+[dependencies]
+log = { workspace = true, default-features = false }
+thiserror = { workspace = true, default-features = false }
+embedded-hal = { version = "1.0", optional = true }
+usb-device = { version = "0.3", optional = true }
+
+[features]
+default = ["std"]
+std = ["thiserror/std"]
+embedded = ["dep:embedded-hal"]
+usb-device = ["dep:usb-device", "embedded"]

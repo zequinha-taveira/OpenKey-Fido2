@@ -1,0 +1,26 @@
+[package]
+name = "openkey-core"
+version.workspace = true
+edition.workspace = true
+description = "MCU-independent FIDO2, CTAP2, and WebAuthn domain core"
+license.workspace = true
+build = "build.rs"
+
+[lib]
+name = "openkey_core"
+
+[dependencies]
+crypto = { package = "openkey-crypto", path = "../openkey-crypto", version = "0.1.1", default-features = false }
+storage = { package = "openkey-storage", path = "../openkey-storage", version = "0.1.1", default-features = false }
+log.workspace = true
+ciborium = { workspace = true, default-features = false }
+serde_bytes = { workspace = true, default-features = false, features = ["alloc"] }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+ring.workspace = true
+zeroize.workspace = true
+thiserror = { workspace = true, default-features = false }
+
+[features]
+default = ["rs256", "std"]
+rs256 = ["crypto/rs256"]
+std = ["crypto/std", "storage/std"]
