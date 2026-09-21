@@ -1,0 +1,12 @@
+[package]
+name = "openkey-hal-unified"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Hardware Abstraction Layer for OpenKey FIDO2"
+
+[dependencies]
+log = { workspace = true }
+thiserror = { workspace = true }
+rand = { workspace = true, optional = true }

@@ -1,0 +1,15 @@
+[package]
+name = "openkey-core-ctap2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CTAP2 protocol layer for OpenKey FIDO2"
+
+[dependencies]
+log = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+ciborium = { workspace = true }
+zeroize = { workspace = true }
