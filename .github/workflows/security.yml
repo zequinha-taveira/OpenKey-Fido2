@@ -1,0 +1,118 @@
+name: Security
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "30 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: Dependency Review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+  rust-audit:
+    name: Rust Dependency Audit
+    if: hashFiles('**/Cargo.lock') != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        run: cargo audit
+
+  secrets:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  workflow-audit:
+    name: GitHub Actions Security Audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Audit workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -d ".github/workflows" ]; then
+            echo "No workflow directory found."
+            exit 0
+          fi
+
+          echo "Scanning workflows for privileged or risky patterns..."
+
+          if grep -RniE \
+            'pull_request_target|workflow_run|contents:[[:space:]]*write|persist-credentials:[[:space:]]*true' \
+            .github/workflows; then
+            echo "::warning::Review the workflow security findings above."
+          else
+            echo "No high-risk workflow patterns detected by this basic audit."
+          fi
+
+  python-audit:
+    name: Python Dependency Audit
+    if: hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/poetry.lock', '**/Pipfile.lock') != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Install pip-audit
+        run: python -m pip install --upgrade pip pip-audit
+
+      - name: Run pip-audit
+        run: pip-audit
