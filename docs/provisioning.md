@@ -21,8 +21,4 @@ Device provisioning is the process of generating or injecting root attestation k
 
 ## Provisioning CLI & Tools
 
-The `openkey-manager` suite provides an automated provisioning workflow:
-
-```bash
-cargo run -p openkey-manager -- application provision --device /dev/hidraw0 --cert attestation.der --key attestation.key
-```
+The `openkey-manager` suite will provide an automated provisioning workflow (currently under active development).

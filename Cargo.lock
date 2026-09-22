@@ -1033,6 +1033,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "openkey-core-authenticator"
+version = "0.1.1"
+dependencies = [
+ "log",
+ "serde",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "openkey-core-credentials"
+version = "0.1.1"
+dependencies = [
+ "log",
+ "serde",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "openkey-core-ctap2"
+version = "0.1.1"
+dependencies = [
+ "ciborium",
+ "log",
+ "serde",
+ "serde_bytes",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "openkey-core-webauthn"
+version = "0.1.1"
+dependencies = [
+ "log",
+ "serde",
+ "serde_bytes",
+ "thiserror",
+]
+
+[[package]]
 name = "openkey-crypto"
 version = "0.1.1"
 dependencies = [
@@ -1073,6 +1115,24 @@ dependencies = [
  "log",
  "nb 1.1.0",
  "panic-halt 1.0.0",
+]
+
+[[package]]
+name = "openkey-hal-unified"
+version = "0.1.1"
+dependencies = [
+ "log",
+ "rand",
+ "thiserror",
+]
+
+[[package]]
+name = "openkey-manager"
+version = "0.1.1"
+dependencies = [
+ "log",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]

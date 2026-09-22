@@ -34,7 +34,7 @@ pub enum CtapStatusCode {
     PinPolicyViolation = 0x37,
     PinTokenExpired = 0x38,
     RequestAndPinNotAllowed = 0x39,
-    KeyStoreFull = 0x2C,
+    KeyStoreFull = 0x28,
     NoCredentials = 0x2E,
     UserActionTimeout = 0x2F,
     NotAllowed = 0x30,

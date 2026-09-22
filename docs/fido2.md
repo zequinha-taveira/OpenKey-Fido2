@@ -1,11 +1,11 @@
 # OpenKey FIDO2 / WebAuthn Protocol Guide
 
-## Specifications Implemented
+## Specifications & Target Support
 
-- **FIDO CTAP 2.1**: Client to Authenticator Protocol 2.1 standard.
-- **W3C Web Authentication (WebAuthn) Level 2 & Level 3**: Browser authentication API.
-- **CTAP 2.0 Backward Compatibility**: Full support for legacy FIDO2 authenticators.
-- **U2F (CTAP1)**: Backward interoperability for older services.
+- **FIDO CTAP 2.1**: Client to Authenticator Protocol 2.1 standard (planned / pending verification).
+- **W3C Web Authentication (WebAuthn) Level 2 & Level 3**: Browser authentication API (planned / pending verification).
+- **CTAP 2.0 Backward Compatibility**: Support for legacy FIDO2 authenticators (planned / pending verification).
+- **U2F (CTAP1)**: Backward interoperability for legacy security keys (planned / pending verification).
 
 ## Supported Commands
 
