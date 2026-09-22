@@ -139,8 +139,7 @@ fn test_crypto_sign_verify_tampered_data() {
 fn test_crypto_encrypt_decrypt_roundtrip() {
     let crypto = CryptoEngine::new().unwrap();
     let plaintext = b"secret message";
-    // lgtm[rust/hard-coded-cryptographic-value] — nonce fixo apenas para teste de roundtrip.
-    let nonce = [0u8; 12];
+    let nonce: [u8; 12] = rand::random();
     let ciphertext = crypto.encrypt(plaintext, &nonce).unwrap();
     assert_ne!(ciphertext, plaintext);
     let decrypted = crypto.decrypt(&ciphertext, &nonce).unwrap();
@@ -151,8 +150,7 @@ fn test_crypto_encrypt_decrypt_roundtrip() {
 fn test_crypto_encrypt_tampered_ciphertext() {
     let crypto = CryptoEngine::new().unwrap();
     let plaintext = b"secret message";
-    // lgtm[rust/hard-coded-cryptographic-value] — nonce fixo apenas para teste de tampering.
-    let nonce = [0u8; 12];
+    let nonce: [u8; 12] = rand::random();
     let mut ciphertext = crypto.encrypt(plaintext, &nonce).unwrap();
     ciphertext[0] ^= 0xFF;
     let result = crypto.decrypt(&ciphertext, &nonce);
