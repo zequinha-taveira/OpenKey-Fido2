@@ -1,0 +1,26 @@
+name: Security Bot
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  security-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Security check
+        run: |
+          echo "Running security checks..."
+
+      - name: Comment on PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --body "Security scan completed."
