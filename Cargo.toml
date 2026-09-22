@@ -21,6 +21,12 @@ members = [
     "examples/transport",
     "examples/webauthn",
     "tests",
+    "manager",
+    "hal",
+    "core/authenticator",
+    "core/credentials",
+    "core/ctap2",
+    "core/webauthn",
 ]
 
 [workspace.package]

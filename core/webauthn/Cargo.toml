@@ -1,0 +1,13 @@
+[package]
+name = "openkey-core-webauthn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "WebAuthn types and structures for OpenKey FIDO2"
+
+[dependencies]
+log = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
