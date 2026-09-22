@@ -514,7 +514,9 @@ mod tests {
     fn test_encrypt_decrypt_v1_roundtrip_zero_iv() {
         let proto = PinUvProtocol::new(1).unwrap();
         let plaintext = b"0123456789abcdef";
-        let ct = proto.encrypt(&V1_KDF_EXPECTED, plaintext).unwrap();
+        let v1_key = kdf_v1(&Z);
+        assert_eq!(v1_key, V1_KDF_EXPECTED);
+        let ct = proto.encrypt(&v1_key, plaintext).unwrap();
         assert_eq!(ct.len(), 16);
         // Vetor externo: AES-256-CBC(key=v1_kdf, iv=0*16, "0123456789abcdef")
         let expected = [
