@@ -7,7 +7,7 @@
 - **CTAP 2.0 Backward Compatibility**: Support for legacy FIDO2 authenticators (planned / pending verification).
 - **U2F (CTAP1)**: Backward interoperability for legacy security keys (planned / pending verification).
 
-## Supported Commands
+## Target CTAP2 Commands (Planned / Under Verification)
 
 | Command | Opcode | Description |
 | :--- | :---: | :--- |
