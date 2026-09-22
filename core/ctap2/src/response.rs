@@ -47,3 +47,14 @@ pub struct Ctap2Response {
     pub status: CtapStatusCode,
     pub data: Option<Vec<u8>>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_key_store_full_status_code() {
+        assert_eq!(CtapStatusCode::KeyStoreFull as u8, 0x28);
+    }
+}
+
