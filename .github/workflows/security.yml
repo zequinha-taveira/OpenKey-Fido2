@@ -30,7 +30,6 @@ jobs:
 
   rust-audit:
     name: Rust Dependency Audit
-    if: hashFiles('**/Cargo.lock') != ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -97,7 +96,6 @@ jobs:
 
   python-audit:
     name: Python Dependency Audit
-    if: hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/poetry.lock', '**/Pipfile.lock') != ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
