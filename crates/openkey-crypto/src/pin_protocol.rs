@@ -546,10 +546,8 @@ mod tests {
     #[test]
     fn test_encrypt_decrypt_v2_roundtrip_iv_prefix() {
         let proto = PinUvProtocol::new(2).unwrap();
-        // lgtm[rust/hard-coded-cryptographic-value] — chave derivada do vetor de teste.
-        let mut key64 = [0u8; 64];
-        key64[..32].copy_from_slice(&V2_HMAC_KEY_EXPECTED);
-        key64[32..].copy_from_slice(&V2_AES_KEY_EXPECTED);
+        // chave derivada do vetor de teste.
+        let mut key64 = [V2_HMAC_KEY_EXPECTED, V2_AES_KEY_EXPECTED].concat();
         let plaintext = b"0123456789abcdef";
         let ct = proto.encrypt(&key64, plaintext).unwrap();
         assert_eq!(ct.len(), 32);
