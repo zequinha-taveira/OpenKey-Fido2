@@ -4,7 +4,9 @@ use ciborium::value::Value;
 use serde::{de::DeserializeOwned, Serialize};
 
 /// Decodes CBOR bytes into a typed structure.
-pub fn decode_cbor<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ciborium::de::Error<std::io::Error>> {
+pub fn decode_cbor<T: DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, ciborium::de::Error<std::io::Error>> {
     let mut reader = bytes;
     let res: T = ciborium::from_reader(&mut reader)?;
     if !reader.is_empty() {
@@ -57,4 +59,3 @@ mod tests {
         assert!(result.is_err(), "should reject extra trailing bytes");
     }
 }
-
