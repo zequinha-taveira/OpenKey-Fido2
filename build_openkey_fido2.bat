@@ -31,6 +31,8 @@ if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 
 set "TARGET_RP2350=thumbv8m.main-none-eabihf"
 set "TARGET_NRF52840=thumbv7em-none-eabihf"
+set "RP2350_DIR=%ROOT%\targets\rp2350"
+set "WORKSPACE_TARGET_DIR=%ROOT%\target"
 
 set "MODE=debug"
 set "ACTION=workspace"
@@ -195,6 +197,33 @@ exit /b 0
 
 
 REM ============================================================
+REM SHA-256
+REM ============================================================
+
+:write_sha256
+
+set "OPENKEY_ARTIFACT=%~1"
+
+if not exist "%OPENKEY_ARTIFACT%" (
+    echo [openkey-fido2] ERROR: artefato nao encontrado para checksum:
+    echo   %OPENKEY_ARTIFACT%
+    exit /b 1
+)
+
+powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference = 'Stop'; $artifact = $env:OPENKEY_ARTIFACT; $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $artifact).Hash.ToLowerInvariant(); $checksum = $artifact + '.sha256'; Set-Content -LiteralPath $checksum -Value ($hash + '  ' + [IO.Path]::GetFileName($artifact)) -Encoding ascii; $expected = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0].ToLowerInvariant(); if ($hash -ne $expected) { Write-Error 'SHA-256 mismatch'; exit 1 }"
+if errorlevel 1 (
+    echo [openkey-fido2] ERROR: falha na validacao SHA-256:
+    echo   %OPENKEY_ARTIFACT%
+    exit /b 1
+)
+
+echo [openkey-fido2] SHA-256 validado:
+echo   %OPENKEY_ARTIFACT%.sha256
+
+exit /b 0
+
+
+REM ============================================================
 REM Workspace
 REM ============================================================
 
@@ -205,7 +234,7 @@ echo [openkey-fido2] Build workspace: %MODE%
 if /I "%MODE%"=="release" (
     cargo build --workspace --release --locked
 ) else (
-    cargo build --workspace
+    cargo build --workspace --locked
 )
 
 if errorlevel 1 exit /b 1
@@ -224,7 +253,7 @@ echo [openkey-fido2] Build fido2-simulator: %MODE%
 if /I "%MODE%"=="release" (
     cargo build -p fido2-simulator --release --locked
 ) else (
-    cargo build -p fido2-simulator
+    cargo build -p fido2-simulator --locked
 )
 
 if errorlevel 1 exit /b 1
@@ -238,21 +267,21 @@ REM ============================================================
 
 :rp2350
 
-if not exist "%ROOT%\examples\rp2350-firmware\Cargo.toml" (
+if not exist "%RP2350_DIR%\Cargo.toml" (
     echo [openkey-fido2] ERROR: firmware RP2350 nao encontrado.
     echo Caminho:
-    echo   %ROOT%\examples\rp2350-firmware
+    echo   %RP2350_DIR%
     exit /b 1
 )
 
 echo [openkey-fido2] Build firmware RP2350: %MODE%
 
-pushd "%ROOT%\examples\rp2350-firmware"
+pushd "%RP2350_DIR%"
 
 if /I "%MODE%"=="release" (
-    cargo build --release --locked
+    cargo build --features firmware --target "%TARGET_RP2350%" --release --locked
 ) else (
-    cargo build
+    cargo build --features firmware --target "%TARGET_RP2350%" --locked
 )
 
 set "RC=%ERRORLEVEL%"
@@ -260,6 +289,17 @@ set "RC=%ERRORLEVEL%"
 popd
 
 if not "%RC%"=="0" exit /b %RC%
+
+set "ELF=%WORKSPACE_TARGET_DIR%\%TARGET_RP2350%\%MODE%\rp2350-firmware"
+
+if not exist "%ELF%" (
+    echo [openkey-fido2] ERROR: ELF nao foi gerado:
+    echo   %ELF%
+    exit /b 1
+)
+
+call :write_sha256 "%ELF%"
+if errorlevel 1 exit /b 1
 
 echo.
 echo [openkey-fido2] RP2350 build concluido.
@@ -279,8 +319,8 @@ if errorlevel 1 exit /b 1
 
 set "PROFILE=%MODE%"
 
-set "ELF=%ROOT%\examples\rp2350-firmware\target\%TARGET_RP2350%\%PROFILE%\rp2350-firmware"
-set "UF2=%ROOT%\examples\rp2350-firmware\target\%TARGET_RP2350%\%PROFILE%\rp2350-firmware.uf2"
+set "ELF=%WORKSPACE_TARGET_DIR%\%TARGET_RP2350%\%PROFILE%\rp2350-firmware"
+set "UF2=%WORKSPACE_TARGET_DIR%\%TARGET_RP2350%\%PROFILE%\rp2350-firmware.uf2"
 
 if not exist "%ELF%" (
     if exist "%ELF%.elf" (
@@ -331,6 +371,9 @@ if not exist "%UF2%" (
     exit /b 1
 )
 
+call :write_sha256 "%UF2%"
+if errorlevel 1 exit /b 1
+
 echo.
 echo [openkey-fido2] UF2 gerado:
 echo   %UF2%
@@ -345,15 +388,15 @@ REM ============================================================
 
 :nrf52840
 
-if not exist "%ROOT%\examples\nrf52840-firmware\Cargo.toml" (
+if not exist "%ROOT%\targets\nrf52840\Cargo.toml" (
     echo [openkey-fido2] WARNING: firmware nRF52840 nao encontrado.
-    echo   %ROOT%\examples\nrf52840-firmware
+    echo   %ROOT%\targets\nrf52840
     exit /b 0
 )
 
 echo [openkey-fido2] Build firmware nRF52840.
 
-pushd "%ROOT%\examples\nrf52840-firmware"
+pushd "%ROOT%\targets\nrf52840"
 
 if /I "%MODE%"=="release" (
     cargo build --release --locked --target "%TARGET_NRF52840%"
@@ -410,13 +453,13 @@ if errorlevel 1 (
 
 echo [openkey-fido2] cargo check RP2350...
 
-cargo check -p transport --target "%TARGET_RP2350%" --features embedded --no-default-features
+cargo check -p transport --target "%TARGET_RP2350%" --features embedded --no-default-features --locked
 
 if errorlevel 1 exit /b 1
 
 echo [openkey-fido2] cargo check nRF52840...
 
-cargo check -p transport --target "%TARGET_NRF52840%" --features embedded --no-default-features
+cargo check -p transport --target "%TARGET_NRF52840%" --features embedded --no-default-features --locked
 
 if errorlevel 1 exit /b 1
 
@@ -431,7 +474,7 @@ REM ============================================================
 
 echo [openkey-fido2] Executando testes...
 
-cargo test --workspace
+cargo test --workspace --locked
 
 if errorlevel 1 exit /b 1
 
@@ -446,7 +489,7 @@ REM ============================================================
 
 echo [openkey-fido2] Executando Clippy...
 
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings
 
 if errorlevel 1 exit /b 1
 
@@ -477,16 +520,6 @@ REM ============================================================
 echo [openkey-fido2] Limpando workspace...
 
 cargo clean
-
-if exist "%ROOT%\examples\rp2350-firmware\target" (
-    echo [openkey-fido2] Limpando target RP2350...
-    rmdir /S /Q "%ROOT%\examples\rp2350-firmware\target"
-)
-
-if exist "%ROOT%\examples\nrf52840-firmware\target" (
-    echo [openkey-fido2] Limpando target nRF52840...
-    rmdir /S /Q "%ROOT%\examples\nrf52840-firmware\target"
-)
 
 echo [openkey-fido2] Limpeza concluida.
 

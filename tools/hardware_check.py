@@ -15,7 +15,8 @@ Nota sobre identidades USB:
   (0x1050:0x0407, Product Name: "Yubico Yubikey" / "YubiKey OTP+FIDO+CCID") build,
   not for distribution.
 
-Uso: python tools/hardware_check.py [--json] [--ykman-timeout S] [--opensc-timeout S]
+Uso: python tools/hardware_check.py [--json] [--strict-hardware]
+     [--ykman-timeout S] [--opensc-timeout S]
 """
 
 import argparse
@@ -23,6 +24,100 @@ import ctypes
 import json
 import subprocess
 import sys
+
+
+# Verdicts are intentionally strings: they are stable in JSON and easy to
+# consume from shell/CI tooling.  A BLOCKED check is not a successful hardware
+# validation; it means that a prerequisite (tool, service, or device) was not
+# available.  NOT_RUN is reserved for checks deliberately skipped because a
+# prerequisite was unavailable or the caller disabled a sub-check.
+VERDICT_PASS = "PASS"
+VERDICT_FAIL = "FAIL"
+VERDICT_BLOCKED = "BLOCKED"
+VERDICT_NOT_RUN = "NOT_RUN"
+VERDICTS = frozenset(
+    (VERDICT_PASS, VERDICT_FAIL, VERDICT_BLOCKED, VERDICT_NOT_RUN)
+)
+
+# Strict exit codes.  The default CLI mode keeps the historical behaviour of
+# returning zero when no failure was observed, even if hardware validation was
+# blocked; --strict-hardware exposes these non-zero BLOCKED/NOT_RUN codes.
+EXIT_PASS = 0
+EXIT_FAIL = 1
+EXIT_BLOCKED = 2
+EXIT_NOT_RUN = 3
+
+
+def _diagnostic(verdict, expected, observed, **extra):
+    """Return the common, JSON-safe verdict/diagnostic fields."""
+
+    if verdict not in VERDICTS:
+        raise ValueError(f"veredicto inválido: {verdict!r}")
+    result = {
+        "verdict": verdict,
+        # ``status`` is a readable alias for consumers that used status-based
+        # result models; ``verdict`` remains the canonical field.
+        "status": verdict,
+        "expected": expected,
+        "observed": observed,
+    }
+    result.update(extra)
+    return result
+
+
+def _with_diagnostic(result, verdict, expected, observed, **extra):
+    """Add common verdict fields to an existing legacy probe result."""
+
+    result.update(_diagnostic(verdict, expected, observed, **extra))
+    return result
+
+
+class _LegacyProbeResult(dict):
+    """Dict result that keeps equality with the original two-field probes.
+
+    Existing callers can still compare a tool result to
+    ``{"present": bool, "version": value}``, while new callers receive the
+    richer verdict/diagnostic fields through normal mapping access and JSON.
+    """
+
+    def __eq__(self, other):
+        if isinstance(other, dict) and set(other).issubset({"present", "version"}):
+            return {key: self.get(key) for key in other} == other
+        return super().__eq__(other)
+
+
+def _aggregate_verdict(*results):
+    """Combine checks conservatively; FAIL always outranks blocked/skipped."""
+
+    verdicts = [r.get("verdict") for r in results if isinstance(r, dict)]
+    if VERDICT_FAIL in verdicts:
+        return VERDICT_FAIL
+    if VERDICT_BLOCKED in verdicts:
+        return VERDICT_BLOCKED
+    if VERDICT_NOT_RUN in verdicts:
+        return VERDICT_NOT_RUN
+    if verdicts and all(v == VERDICT_PASS for v in verdicts):
+        return VERDICT_PASS
+    return VERDICT_NOT_RUN
+
+
+def exit_code_for_verdict(verdict, *, compatibility=False):
+    """Map a verdict to an exit code.
+
+    ``compatibility=True`` is the historical non-strict policy: BLOCKED and
+    NOT_RUN are reported in the result but do not become a process failure.
+    An actual FAIL always remains non-zero.
+    """
+
+    if verdict == VERDICT_PASS:
+        return EXIT_PASS
+    if verdict == VERDICT_FAIL:
+        return EXIT_FAIL
+    if verdict == VERDICT_BLOCKED:
+        return EXIT_PASS if compatibility else EXIT_BLOCKED
+    if verdict == VERDICT_NOT_RUN:
+        return EXIT_PASS if compatibility else EXIT_NOT_RUN
+    raise ValueError(f"veredicto inválido: {verdict!r}")
 
 IDENTITY_NOTE = (
     "The default USB identity pid.codes is 0x1209:0x0001; "
@@ -66,7 +161,27 @@ def check_fido2_lib():
             out["version"] = getattr(fido2, "__version__", "instalada")
         except Exception:
             pass
-    return out
+    return _tool_verdict(
+        out,
+        "python-fido2",
+        "pacote python-fido2 instalado e importável",
+    )
+
+
+def _tool_verdict(result, label, expected):
+    """Decorate a legacy tool probe without changing its old return shape."""
+
+    if result.get("present"):
+        observed = f"{label} disponível"
+        if result.get("version"):
+            observed += f" (versão {result['version']})"
+        verdict = VERDICT_PASS
+    else:
+        observed = f"{label} ausente ou não executável"
+        verdict = VERDICT_BLOCKED
+    enriched = dict(result)
+    enriched.update(_diagnostic(verdict, expected, observed))
+    return _LegacyProbeResult(enriched)
 
 
 def check_opensc(timeout=10.0):
@@ -85,7 +200,11 @@ def check_opensc(timeout=10.0):
             out["version"] = lines[0].strip() if lines and lines[0].strip() else None
     except Exception:
         pass
-    return out
+    return _tool_verdict(
+        out,
+        "opensc-tool",
+        "opensc-tool disponível no PATH",
+    )
 
 
 # ---------------------------------------------------------------- HID / CTAP
@@ -96,6 +215,24 @@ def check_hid():
     try:
         from fido2.hid import CtapHidDevice
 
+    except ImportError as e:
+        out["error"] = repr(e)
+        return _with_diagnostic(
+            out,
+            VERDICT_BLOCKED,
+            "python-fido2 instalado para enumerar HID FIDO",
+            "python-fido2 indisponível; enumeração CTAPHID não executada",
+        )
+    except Exception as e:
+        out["error"] = repr(e)
+        return _with_diagnostic(
+            out,
+            VERDICT_FAIL,
+            "importação de python-fido2 sem erro",
+            f"falha ao importar python-fido2: {e!r}",
+        )
+
+    try:
         devs = list(CtapHidDevice.list_devices())
         for d in devs:
             desc = d.descriptor
@@ -115,13 +252,46 @@ def check_hid():
                     "identity_flavor": flavor,
                 }
             )
-        if not devs:
-            return out
-        # Primeiro dispositivo: valida CTAPHID com ping (responde eco).
+    except OSError as e:
+        out["error"] = repr(e)
+        return _with_diagnostic(
+            out,
+            VERDICT_BLOCKED,
+            "enumeração HID FIDO disponível no host",
+            f"HID FIDO não acessível: {e!r}",
+        )
+    except Exception as e:
+        out["error"] = repr(e)
+        return _with_diagnostic(
+            out,
+            VERDICT_FAIL,
+            "enumeração HID FIDO concluída",
+            f"falha ao enumerar HID FIDO: {e!r}",
+        )
+
+    if not devs:
+        return _with_diagnostic(
+            out,
+            VERDICT_BLOCKED,
+            "pelo menos um dispositivo HID FIDO real",
+            "nenhum dispositivo HID FIDO enumerado; CTAPHID não foi executado",
+        )
+
+    # Primeiro dispositivo: valida CTAPHID com ping (responde eco).  A mera
+    # enumeração USB nunca é tratada como hardware validado.
+    try:
         dev = devs[0].open()
         try:
             echo = dev.ping(b"openkey-ping")
             out["ctap_ok"] = echo == b"openkey-ping"
+            if not out["ctap_ok"]:
+                return _with_diagnostic(
+                    out,
+                    VERDICT_FAIL,
+                    "CTAPHID PING devolver exatamente openkey-ping",
+                    f"resposta CTAPHID inesperada: {echo!r}",
+                )
+
             try:
                 try:
                     from fido2.ctap2 import CTAP2
@@ -135,13 +305,52 @@ def check_hid():
                     "algorithms": [str(a) for a in getattr(info, "algorithms", [])],
                     "options": dict(getattr(info, "options", {}) or {}),
                 }
-            except Exception as e:  # CTAP2 pode não estar implementado ainda
+                return _with_diagnostic(
+                    out,
+                    VERDICT_PASS,
+                    "CTAPHID PING e CTAP2 GetInfo responderem",
+                    {
+                        "devices": len(devs),
+                        "ctap_ok": True,
+                        "get_info": True,
+                    },
+                )
+            except ImportError as e:
+                # PING demonstrou transporte, mas não se pode declarar a
+                # validação CTAP2 completa sem a camada correspondente.
                 out["get_info"] = f"CTAP2 indisponível: {e}"
+                return _with_diagnostic(
+                    out,
+                    VERDICT_NOT_RUN,
+                    "CTAP2 GetInfo executado após CTAPHID PING",
+                    f"camada CTAP2 indisponível: {e!r}",
+                )
+            except Exception as e:  # CTAP2 falhou no dispositivo real
+                out["get_info"] = f"CTAP2 indisponível: {e}"
+                return _with_diagnostic(
+                    out,
+                    VERDICT_FAIL,
+                    "CTAP2 GetInfo responder sem exceção",
+                    f"falha no CTAP2 GetInfo: {e!r}",
+                )
         finally:
             dev.close()
+    except OSError as e:
+        out["error"] = repr(e)
+        return _with_diagnostic(
+            out,
+            VERDICT_BLOCKED,
+            "dispositivo HID abrir e responder ao CTAPHID PING",
+            f"dispositivo HID indisponível durante abertura/sonda: {e!r}",
+        )
     except Exception as e:
         out["error"] = repr(e)
-    return out
+        return _with_diagnostic(
+            out,
+            VERDICT_FAIL,
+            "dispositivo HID abrir e responder ao CTAPHID PING",
+            f"falha ao abrir/sondar dispositivo: {e!r}",
+        )
 
 
 # ---------------------------------------------------------------- CCID/PCSC
@@ -295,30 +504,57 @@ def check_ccid(apdu_checks=True):
     try:
         sc = _load_pcsc()
     except Exception as e:
-        # Sem PC/SC instalado — não é erro fatal; mantém JSON compatível para CI.
         out["error"] = f"PC/SC indisponível: {e}"
         out["platform"] = sys.platform
-        return out
+        return _with_diagnostic(
+            out,
+            VERDICT_BLOCKED,
+            "biblioteca/serviço PC/SC disponível para consultar leitores CCID",
+            f"PC/SC indisponível: {e}",
+        )
     ctx = ctypes.c_size_t()
     if sc.SCardEstablishContext(SCARD_SCOPE_USER, None, None, ctypes.byref(ctx)) != SCARD_S_SUCCESS:
         out["error"] = "SCardEstablishContext falhou (serviço Smart Card ativo?)"
         out["platform"] = sys.platform
-        return out
+        return _with_diagnostic(
+            out,
+            VERDICT_BLOCKED,
+            "serviço PC/SC ativo e contexto estabelecido",
+            out["error"],
+        )
     try:
         length = ctypes.c_ulong(0)
         rc = sc.SCardListReaders(ctx, None, None, ctypes.byref(length))
         if rc != SCARD_S_SUCCESS or not length.value:
             out["error"] = "nenhum leitor PCSC"
             out["platform"] = sys.platform
-            return out
+            return _with_diagnostic(
+                out,
+                VERDICT_BLOCKED,
+                "pelo menos um leitor CCID enumerado por PC/SC",
+                out["error"],
+            )
         buf = ctypes.create_string_buffer(length.value)
         if sc.SCardListReaders(ctx, None, buf, ctypes.byref(length)) != SCARD_S_SUCCESS:
             out["error"] = "nenhum leitor PCSC"
             out["platform"] = sys.platform
-            return out
+            return _with_diagnostic(
+                out,
+                VERDICT_BLOCKED,
+                "lista de leitores PC/SC preenchida",
+                out["error"],
+            )
         readers = [r.decode() for r in buf.raw[: length.value - 1].split(b"\x00") if r] if length.value > 1 else []
         out["readers"] = []
         out["platform"] = sys.platform
+        if not readers:
+            out["error"] = "nenhum leitor PCSC"
+            return _with_diagnostic(
+                out,
+                VERDICT_BLOCKED,
+                "pelo menos um leitor CCID enumerado por PC/SC",
+                out["error"],
+            )
 
         proto_t0 = ctypes.c_ulong(SCARD_PROTOCOL_T0)
         pci_t0 = SCARD_IO_REQUEST(SCARD_PROTOCOL_T0, ctypes.sizeof(SCARD_IO_REQUEST))
@@ -376,7 +612,7 @@ def check_ccid(apdu_checks=True):
                 ctypes.byref(prot),
             )
             if rc == SCARD_S_SUCCESS:
-                sc.SCardStatus(
+                status_rc = sc.SCardStatus(
                     card,
                     reader_b,
                     ctypes.byref(ctypes.c_ulong(64)),
@@ -386,42 +622,136 @@ def check_ccid(apdu_checks=True):
                     ctypes.byref(atr_len),
                 )
                 st = state.value
+                entry["status"] = st
                 entry["mute"] = bool(st & SCARD_STATE_MUTE)
                 entry["present"] = bool(st & SCARD_STATE_PRESENT)
                 entry["atr"] = atr_buf.raw[: atr_len.value].hex()
-                if apdu_checks and not entry["mute"]:
-                    for label, aid in (
-                        ("oath", OATH_AID),
-                        ("management", MGMT_AID),
-                        ("piv", PIV_AID),
-                        ("openpgp", OPENPGP_AID),
-                    ):
-                        select = bytes([0x00, 0xA4, 0x04, 0x00, len(aid)]) + aid
-                        raw = transmit(card, select)
-                        if raw is None:
-                            entry[f"select_{label}"] = None
+                if status_rc != SCARD_S_SUCCESS:
+                    entry["status_error"] = hex(status_rc & 0xFFFFFFFF)
+                    _with_diagnostic(
+                        entry,
+                        VERDICT_FAIL,
+                        "SCardStatus retornar SCARD_S_SUCCESS",
+                        f"SCardStatus falhou: {entry['status_error']}",
+                    )
+                else:
+                    if apdu_checks and not entry["mute"]:
+                        for label, aid in (
+                            ("oath", OATH_AID),
+                            ("management", MGMT_AID),
+                            ("piv", PIV_AID),
+                            ("openpgp", OPENPGP_AID),
+                        ):
+                            select = bytes([0x00, 0xA4, 0x04, 0x00, len(aid)]) + aid
+                            raw = transmit(card, select)
+                            if raw is None:
+                                entry[f"select_{label}"] = None
+                            else:
+                                data, sw = raw[:-2], raw[-2:]
+                                entry[f"select_{label}"] = {
+                                    "sw": sw.hex(),
+                                    "data": data.hex(),
+                                }
+                    if entry["mute"]:
+                        _with_diagnostic(
+                            entry,
+                            VERDICT_FAIL,
+                            "cartão CCID presente e não mudo",
+                            "cartão reportado como mute",
+                        )
+                    elif not entry["present"]:
+                        _with_diagnostic(
+                            entry,
+                            VERDICT_BLOCKED,
+                            "cartão presente no leitor CCID",
+                            "leitor presente, mas nenhum cartão foi reportado",
+                        )
+                    elif not entry["atr"]:
+                        _with_diagnostic(
+                            entry,
+                            VERDICT_FAIL,
+                            "ICC Power On retornar ATR não vazio",
+                            "cartão presente, mas ATR vazio",
+                        )
+                    elif apdu_checks:
+                        select_results = [
+                            entry.get(f"select_{label}")
+                            for label in ("oath", "management", "piv", "openpgp")
+                        ]
+                        if all(
+                            isinstance(item, dict) and item.get("sw") == "9000"
+                            for item in select_results
+                        ):
+                            _with_diagnostic(
+                                entry,
+                                VERDICT_PASS,
+                                "ATR válido e SELECT dos quatro applets retornar SW=9000",
+                                "ATR e SELECT OATH/Management/PIV/OpenPGP responderam 9000",
+                            )
                         else:
-                            data, sw = raw[:-2], raw[-2:]
-                            entry[f"select_{label}"] = {
-                                "sw": sw.hex(),
-                                "data": data.hex(),
-                            }
-                sc.SCardDisconnect(card, 0)
+                            _with_diagnostic(
+                                entry,
+                                VERDICT_FAIL,
+                                "ATR válido e SELECT dos quatro applets retornar SW=9000",
+                                "um ou mais SELECT não responderam SW=9000",
+                            )
+                    else:
+                        # O chamador explicitamente pediu apenas a sonda básica;
+                        # não converter isso em validação completa do hardware.
+                        _with_diagnostic(
+                            entry,
+                            VERDICT_PASS,
+                            "leitor/cartão CCID presente e ATR não vazio",
+                            "leitor/cartão presentes; SELECT de applets não executado",
+                        )
+                try:
+                    sc.SCardDisconnect(card, 0)
+                except Exception:
+                    pass
             else:
                 err_hex = hex(rc & 0xFFFFFFFF)
                 entry["connect_error"] = err_hex
                 entry["connect_error_desc"] = PCSC_ERROR_MESSAGES.get(
                     err_hex.lower(), "erro de conexão PC/SC"
                 )
+                connect_verdict = (
+                    VERDICT_BLOCKED
+                    if err_hex.lower() in PCSC_ERROR_MESSAGES
+                    else VERDICT_FAIL
+                )
+                _with_diagnostic(
+                    entry,
+                    connect_verdict,
+                    "cartão CCID conectável pelo PC/SC",
+                    f"falha de conexão {err_hex}: {entry['connect_error_desc']}",
+                )
             out["readers"].append({name: entry})
     finally:
         sc.SCardReleaseContext(ctx)
-    return out
+    reader_results = [
+        entry
+        for item in out["readers"]
+        for entry in item.values()
+        if isinstance(entry, dict)
+    ]
+    verdict = _aggregate_verdict(*reader_results)
+    if not apdu_checks and verdict == VERDICT_PASS:
+        verdict = VERDICT_NOT_RUN
+    return _with_diagnostic(
+        out,
+        verdict,
+        "leitor CCID, cartão/ATR e SELECT de applets verificados",
+        {
+            "readers": len(readers),
+            "reader_verdicts": [entry.get("verdict") for entry in reader_results],
+            "apdu_checks": bool(apdu_checks),
+        },
+    )
 
 
 # ---------------------------------------------------------------- ykman presente?
 # Sonda host via `ykman --version` (YubiKey Manager CLI). Nunca falha o check:
-# ausente = reportado com present=False, exit 0. Validação física segue 🚧
+# ausente = reportado com present=False/BLOCKED. Validação física segue pendente
 # (TODO.md: validação física YubiKey — `ykman list --serials` em placa real).
 
 
@@ -441,12 +771,21 @@ def check_ykman(timeout=10.0):
     except Exception:
         # FileNotFoundError (não instalado), TimeoutExpired, etc. — ausente.
         pass
-    return out
+    return _tool_verdict(
+        out,
+        "ykman",
+        "ykman disponível no PATH (ferramenta opcional)",
+    )
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true", help="saída JSON pura")
+    ap.add_argument(
+        "--strict-hardware",
+        action="store_true",
+        help="retorna 2/3 para BLOCKED/NOT_RUN (sem esta opção, preserva o exit 0 legado)",
+    )
     ap.add_argument(
         "--ykman-timeout",
         type=float,
@@ -464,19 +803,49 @@ def main():
     fido2_lib = check_fido2_lib()
     opensc = check_opensc(timeout=args.opensc_timeout)
     ykman = check_ykman(timeout=args.ykman_timeout)
+    hid = check_hid()
+    ccid = check_ccid()
+    overall_verdict = _aggregate_verdict(hid, ccid)
+    exit_code = exit_code_for_verdict(
+        overall_verdict, compatibility=not args.strict_hardware
+    )
 
     result = {
         "identity_note": IDENTITY_NOTE,
         "firmware_requirements": FIRMWARE_REQUIREMENTS_NOTE,
-        "fido2": fido2_lib,
-        "opensc": opensc,
-        "ykman": ykman,
-        "hid": check_hid(),
-        "ccid": check_ccid(),
+        # The direct probes retain their historical two-field shapes.  The
+        # CLI/JSON contract is the richer, verdict-bearing representation.
+        "fido2": _tool_verdict(
+            fido2_lib,
+            "python-fido2",
+            "pacote python-fido2 instalado e importável",
+        ),
+        "opensc": _tool_verdict(
+            opensc,
+            "opensc-tool",
+            "opensc-tool disponível no PATH",
+        ),
+        "ykman": _tool_verdict(
+            ykman,
+            "ykman",
+            "ykman disponível no PATH (ferramenta opcional)",
+        ),
+        "hid": hid,
+        "ccid": ccid,
+        "verdict": overall_verdict,
+        "status": overall_verdict,
+        "expected": "HID FIDO e CCID reais responderem às sondas completas",
+        "observed": {
+            "hid": hid.get("verdict"),
+            "ccid": ccid.get("verdict"),
+            "hardware_validated": overall_verdict == VERDICT_PASS,
+        },
+        "exit_code": exit_code,
+        "strict_exit_code": exit_code_for_verdict(overall_verdict),
     }
     if args.json:
         print(json.dumps(result, indent=2))
-        return
+        return exit_code
 
     print("=== IDENTIDADE USB PADRÃO vs OPT-IN ===")
     print("  " + IDENTITY_NOTE)
@@ -493,11 +862,12 @@ def main():
     print("  [SmartCard]   PC-SC genérico: API nativa do SO (WinSCard/libpcsclite)")
 
     print("=== HID FIDO / CTAPHID (python-fido2) ===")
-    hid = result["hid"]
     for d in hid.get("hid_devices", []):
         flavor = d.get("identity_flavor", "")
         print(f"  dispositivo: {d['product']} {d['vid']}:{d['pid']} [{flavor}]")
     print(f"  CTAPHID ping: {'OK' if hid.get('ctap_ok') else 'FALHOU'}")
+    print(f"  veredicto: {hid.get('verdict')} | esperado: {hid.get('expected')}")
+    print(f"  observado: {hid.get('observed')}")
     gi = hid.get("get_info")
     if isinstance(gi, dict):
         print(f"  GetInfo: versions={gi['versions']} aaguid={gi['aaguid']}")
@@ -513,6 +883,8 @@ def main():
     cc = result["ccid"]
     if cc.get("error"):
         print(f"  erro: {cc['error']}")
+    print(f"  veredicto: {cc.get('verdict')} | esperado: {cc.get('expected')}")
+    print(f"  observado: {cc.get('observed')}")
     for item in cc.get("readers", []):
         for name, e in item.items():
             yk = e.get("ykman_compatible")
@@ -543,6 +915,11 @@ def main():
     else:
         print("  ykman: ausente (ferramenta de fabricante — validação física opcional)")
 
+    print("=== VEREDITO DE HARDWARE ===")
+    print(f"  {overall_verdict}: {result['observed']}")
+    print(f"  exit code efetivo: {exit_code} (strict: {result['strict_exit_code']})")
+    return exit_code
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

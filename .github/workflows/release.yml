@@ -1,0 +1,62 @@
+name: Release artifacts
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rp2350:
+    name: RP2350 firmware (ELF)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv8m.main-none-eabihf
+
+      - name: Install RP2350 build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            gcc-arm-none-eabi \
+            binutils-arm-none-eabi
+
+      - name: Build RP2350 firmware
+        working-directory: targets/rp2350
+        run: cargo build --release --features firmware --target thumbv8m.main-none-eabihf --locked
+
+      - name: Verify and stage release artifacts
+        env:
+          BUILT_ELF: ${{ github.workspace }}/target/thumbv8m.main-none-eabihf/release/rp2350-firmware
+          STAGING_DIR: ${{ runner.temp }}/openkey-rp2350
+        run: |
+          set -Eeuo pipefail
+
+          if [[ ! -f "$BUILT_ELF" ]]; then
+            echo "ERROR: RP2350 ELF was not generated: $BUILT_ELF" >&2
+            exit 1
+          fi
+
+          mkdir -p "$STAGING_DIR"
+          cp "$BUILT_ELF" "$STAGING_DIR/rp2350-firmware.elf"
+          (
+            cd "$STAGING_DIR"
+            sha256sum rp2350-firmware.elf > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openkey-rp2350-${{ github.ref_name }}
+          path: ${{ runner.temp }}/openkey-rp2350/*
+          if-no-files-found: error

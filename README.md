@@ -4,7 +4,15 @@ Open-source FIDO2 / WebAuthn authenticator firmware in Rust for embedded devices
 
 Portable `no_std`-ready core (CTAP2.1, crypto, credential storage) plus pluggable
 transports (USB-HID, CCID, NFC, BLE), board profiles, host simulator, and
-conformance test suites. No hardware required to develop and test.
+host test suites. No hardware is required to develop and test the host paths;
+this does **not** mean that the project has passed physical validation or the
+official FIDO Conformance Tool.
+
+> **Validation status:** implementation and host/simulator coverage are tracked
+> separately from physical hardware and official conformance. Real UV, NFC, BLE,
+> end-to-end physical validation, and FIDO Conformance Tool execution remain
+> pending. See [`docs/fido2.md`](docs/fido2.md) for the four-state matrix and
+> evidence commands.
 
 - Version: `0.1.1`
 - License: `MIT OR Apache-2.0` (`LICENSE-MIT`, `LICENSE-APACHE`)
@@ -13,7 +21,7 @@ conformance test suites. No hardware required to develop and test.
 
 ## Features
 
-- **CTAP 2.1**: MakeCredential / GetAssertion / GetInfo, ClientPIN (protocols 1+2),
+- **CTAP2 / CTAP2.1-targeted handlers**: MakeCredential / GetAssertion / GetInfo, ClientPIN (protocols 1+2),
   Credential Management (`0x0A`), LargeBlobs (`0x0C`), `authenticatorConfig` (`0x0D`),
   Reset, Selection, GetNextAssertion, `hmac-secret`, `credProtect`, `credBlob`,
   `minPinLength`, Enterprise Attestation
@@ -29,8 +37,9 @@ conformance test suites. No hardware required to develop and test.
 - **Boards**: NRF52840, STM32L4, ESP32C3, RP2350, RP2350-Zero, GENERIC profiles
   with AAGUID, capabilities, and security features; BOOTSEL-as-user-presence
   on RP2350
-- **Testing**: Rust unit/integration tests, Python E2E over simulator
-  (JSON line protocol + `--raw-cbor` wire mode), CTAPHID bridge tooling
+- **Testing**: Rust unit/integration tests, Python host-only E2E over the
+  simulator (JSON line protocol + `--raw-cbor` wire mode), CTAPHID bridge
+  tooling; these tests are not official FIDO conformance results
 
 ## Repository layout
 
@@ -129,6 +138,7 @@ device (Linux/UHID) for browsers and conformance tools.
 ## Docs
 
 - `docs/architecture.md` — layers, contracts, MakeCredential/GetAssertion flows
+- `docs/fido2.md` — four-state FIDO2/WebAuthn status matrix and evidence commands
 - `docs/modular-design.md` — workspace crate map
 - `docs/security-model.md`, `docs/portability.md`, `docs/porting-guide.md`
 - `docs/adr/` — design decisions (side-channels, ECIES, flash, ClientPIN, …)

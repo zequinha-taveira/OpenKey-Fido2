@@ -23,8 +23,7 @@
 # Artefatos:
 #   target/debug/
 #   target/release/
-#   examples/rp2350-firmware/target/thumbv8m.main-none-eabihf/
-#   examples/nrf52840-firmware/target/thumbv7em-none-eabihf/
+#   target/thumbv8m.main-none-eabihf/{debug,release}/rp2350-firmware*
 
 set -Eeuo pipefail
 
@@ -32,6 +31,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 TARGET_RP2350="thumbv8m.main-none-eabihf"
 TARGET_NRF52840="thumbv7em-none-eabihf"
+RP2350_DIR="$ROOT/targets/rp2350"
+WORKSPACE_TARGET_DIR="$ROOT/target"
 
 MODE="debug"
 ACTION="workspace"
@@ -120,13 +121,46 @@ require_command() {
         die "'$1' não encontrado no PATH."
 }
 
+record_and_verify_sha256() {
+    local artifact="$1"
+    local checksum="${artifact}.sha256"
+    local artifact_dir
+    local artifact_name
+    local checksum_name
+
+    [[ -f "$artifact" ]] || die "Artefato não encontrado para checksum: $artifact"
+
+    artifact_dir="$(dirname "$artifact")"
+    artifact_name="$(basename "$artifact")"
+    checksum_name="$(basename "$checksum")"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        (
+            cd "$artifact_dir"
+            sha256sum "$artifact_name" > "$checksum_name"
+            sha256sum --check "$checksum_name"
+        ) || die "Falha na validação SHA-256: $artifact"
+    elif command -v shasum >/dev/null 2>&1; then
+        (
+            cd "$artifact_dir"
+            shasum -a 256 "$artifact_name" > "$checksum_name"
+            shasum -a 256 --check "$checksum_name"
+        ) || die "Falha na validação SHA-256: $artifact"
+    else
+        die "Nem sha256sum nem shasum foram encontrados no PATH."
+    fi
+
+    log "SHA-256 validado:"
+    log "  $checksum"
+}
+
 cargo_workspace() {
     log "Build workspace: $MODE"
 
     if [[ "$MODE" == "release" ]]; then
         cargo build --workspace --release --locked
     else
-        cargo build --workspace
+        cargo build --workspace --locked
     fi
 }
 
@@ -136,12 +170,12 @@ build_simulator() {
     if [[ "$MODE" == "release" ]]; then
         cargo build -p fido2-simulator --release --locked
     else
-        cargo build -p fido2-simulator
+        cargo build -p fido2-simulator --locked
     fi
 }
 
 build_rp2350() {
-    local dir="$ROOT/examples/rp2350-firmware"
+    local dir="$RP2350_DIR"
 
     [[ -f "$dir/Cargo.toml" ]] || \
         die "Firmware RP2350 não encontrado: $dir"
@@ -152,36 +186,42 @@ build_rp2350() {
         cd "$dir"
 
         if [[ "$MODE" == "release" ]]; then
-            cargo build --release --locked
+            cargo build \
+                --features firmware \
+                --target "$TARGET_RP2350" \
+                --release \
+                --locked
         else
-            cargo build
+            cargo build \
+                --features firmware \
+                --target "$TARGET_RP2350" \
+                --locked
         fi
     )
 
     local profile="$MODE"
-    local elf="$dir/target/$TARGET_RP2350/$profile/rp2350-firmware"
+    local elf="$WORKSPACE_TARGET_DIR/$TARGET_RP2350/$profile/rp2350-firmware"
 
-    if [[ -f "$elf" ]]; then
-        log "ELF gerado:"
-        log "  $elf"
+    [[ -f "$elf" ]] || die "ELF não foi gerado: $elf"
 
-        if command -v arm-none-eabi-size >/dev/null 2>&1; then
-            arm-none-eabi-size "$elf" || true
-        fi
-    else
-        warn "ELF não localizado em:"
-        warn "  $elf"
+    log "ELF gerado:"
+    log "  $elf"
+
+    if command -v arm-none-eabi-size >/dev/null 2>&1; then
+        arm-none-eabi-size "$elf" || true
     fi
+
+    record_and_verify_sha256 "$elf"
 }
 
 build_rp2350_uf2() {
     build_rp2350
 
-    local dir="$ROOT/examples/rp2350-firmware"
+    local dir="$RP2350_DIR"
     local profile="$MODE"
 
-    local elf="$dir/target/$TARGET_RP2350/$profile/rp2350-firmware"
-    local uf2="$dir/target/$TARGET_RP2350/$profile/rp2350-firmware.uf2"
+    local elf="$WORKSPACE_TARGET_DIR/$TARGET_RP2350/$profile/rp2350-firmware"
+    local uf2="$WORKSPACE_TARGET_DIR/$TARGET_RP2350/$profile/rp2350-firmware.uf2"
 
     [[ -f "$elf" ]] || \
         die "ELF não encontrado: $elf"
@@ -215,6 +255,8 @@ Instale um deles para gerar UF2."
     [[ -f "$uf2" ]] || \
         die "UF2 não foi gerado."
 
+    record_and_verify_sha256 "$uf2"
+
     log "UF2 gerado:"
     log "  $uf2"
 
@@ -222,7 +264,7 @@ Instale um deles para gerar UF2."
 }
 
 build_nrf52840() {
-    local dir="$ROOT/examples/nrf52840-firmware"
+    local dir="$ROOT/targets/nrf52840"
 
     if [[ ! -f "$dir/Cargo.toml" ]]; then
         warn "Firmware nRF52840 não encontrado:"
@@ -267,7 +309,8 @@ Instale com:
         -p transport \
         --target "$TARGET_RP2350" \
         --features embedded \
-        --no-default-features
+        --no-default-features \
+        --locked
 
     log "Executando cargo check para nRF52840..."
 
@@ -275,13 +318,14 @@ Instale com:
         -p transport \
         --target "$TARGET_NRF52840" \
         --features embedded \
-        --no-default-features
+        --no-default-features \
+        --locked
 }
 
 run_tests() {
     log "Executando testes..."
 
-    cargo test --workspace
+    cargo test --workspace --locked
 }
 
 run_clippy() {
@@ -290,6 +334,7 @@ run_clippy() {
     cargo clippy \
         --workspace \
         --all-targets \
+        --locked \
         -- -D warnings
 }
 
@@ -303,16 +348,6 @@ clean_all() {
     log "Limpando workspace..."
 
     cargo clean
-
-    if [[ -d "$ROOT/examples/rp2350-firmware/target" ]]; then
-        log "Limpando target RP2350..."
-        rm -rf "$ROOT/examples/rp2350-firmware/target"
-    fi
-
-    if [[ -d "$ROOT/examples/nrf52840-firmware/target" ]]; then
-        log "Limpando target nRF52840..."
-        rm -rf "$ROOT/examples/nrf52840-firmware/target"
-    fi
 
     log "Limpeza concluída."
 }

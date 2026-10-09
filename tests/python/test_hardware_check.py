@@ -238,3 +238,153 @@ def test_cli_json_includes_neutral_tools_and_identity_note():
     assert isinstance(data["opensc"]["present"], bool)
     assert isinstance(data["ykman"]["present"], bool)
 
+
+def test_verdicts_and_exit_codes_are_explicit():
+    assert hc.VERDICTS == {"PASS", "FAIL", "BLOCKED", "NOT_RUN"}
+    assert hc.exit_code_for_verdict(hc.VERDICT_PASS) == 0
+    assert hc.exit_code_for_verdict(hc.VERDICT_FAIL) == 1
+    assert hc.exit_code_for_verdict(hc.VERDICT_BLOCKED) == 2
+    assert hc.exit_code_for_verdict(hc.VERDICT_NOT_RUN) == 3
+    # Compatibilidade da CLI antiga: bloqueio não vira falso PASS no JSON,
+    # mas também não quebra o CI que só verifica ausência de FAIL.
+    assert hc.exit_code_for_verdict(hc.VERDICT_BLOCKED, compatibility=True) == 0
+    assert hc.exit_code_for_verdict(hc.VERDICT_NOT_RUN, compatibility=True) == 0
+
+
+def test_hid_missing_fido2_is_blocked_not_pass():
+    fake_missing = {"fido2": None, "fido2.hid": None}
+    with mock.patch.dict("sys.modules", fake_missing):
+        result = hc.check_hid()
+    assert result["verdict"] == hc.VERDICT_BLOCKED
+    assert result["status"] == hc.VERDICT_BLOCKED
+    assert result["expected"]
+    assert result["observed"]
+    assert result["ctap_ok"] is False
+
+
+def test_hid_device_ping_failure_is_fail():
+    fake_desc = mock.Mock(
+        path="/dev/hidraw0",
+        vendor_id=0x1209,
+        product_id=0x0001,
+        product_name="openkey-fido2",
+    )
+    fake_opened = mock.Mock()
+    fake_opened.ping.return_value = b"unexpected"
+    fake_device = mock.Mock(descriptor=fake_desc)
+    fake_device.open.return_value = fake_opened
+    fake_hid = mock.Mock()
+    fake_hid.CtapHidDevice.list_devices.return_value = [fake_device]
+    fake_fido2 = mock.Mock()
+    with mock.patch.dict(
+        "sys.modules",
+        {"fido2": fake_fido2, "fido2.hid": fake_hid},
+    ):
+        result = hc.check_hid()
+    assert result["verdict"] == hc.VERDICT_FAIL
+    assert result["ctap_ok"] is False
+    assert "esperada" in result["observed"]
+
+
+def test_ccid_without_pcsc_is_blocked_with_diagnostic():
+    with mock.patch.object(hc, "_load_pcsc", side_effect=OSError("pcsc ausente")):
+        result = hc.check_ccid()
+    assert result["verdict"] == hc.VERDICT_BLOCKED
+    assert result["status"] == hc.VERDICT_BLOCKED
+    assert result["expected"]
+    assert "PC/SC" in result["observed"]
+    assert result["readers"] == []
+
+
+def test_ccid_reader_without_card_is_blocked_not_pass():
+    fake_sc = mock.Mock()
+    fake_sc.SCardEstablishContext.return_value = hc.SCARD_S_SUCCESS
+    readers_raw = b"Generic CCID 0\x00\x00"
+
+    def list_readers(_ctx, _a, buf, plen):
+        if buf is None:
+            plen._obj.value = len(readers_raw)
+        else:
+            import ctypes
+
+            target = ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))
+            for i, value in enumerate(readers_raw):
+                target[i] = value.to_bytes(1, "little")
+            plen._obj.value = len(readers_raw)
+        return hc.SCARD_S_SUCCESS
+
+    fake_sc.SCardListReaders.side_effect = list_readers
+    fake_sc.SCardConnect.return_value = hc.SCARD_S_SUCCESS
+    fake_sc.SCardStatus.return_value = hc.SCARD_S_SUCCESS
+    with mock.patch.object(hc, "_load_pcsc", return_value=fake_sc):
+        result = hc.check_ccid(apdu_checks=False)
+    entry = result["readers"][0]["Generic CCID 0"]
+    assert entry["verdict"] == hc.VERDICT_BLOCKED
+    assert result["verdict"] == hc.VERDICT_BLOCKED
+    assert entry["expected"]
+    assert "nenhum cartão" in entry["observed"]
+
+
+def test_ccid_present_without_apdu_checks_is_not_run():
+    fake_sc = mock.Mock()
+    fake_sc.SCardEstablishContext.return_value = hc.SCARD_S_SUCCESS
+    readers_raw = b"Generic CCID 0\x00\x00"
+
+    def list_readers(_ctx, _a, buf, plen):
+        if buf is None:
+            plen._obj.value = len(readers_raw)
+        else:
+            import ctypes
+
+            target = ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))
+            for i, value in enumerate(readers_raw):
+                target[i] = value.to_bytes(1, "little")
+            plen._obj.value = len(readers_raw)
+        return hc.SCARD_S_SUCCESS
+
+    def status(_card, _reader, _readers_len, state, _protocol, atr, atr_len):
+        state._obj.value = hc.SCARD_STATE_PRESENT
+        raw_atr = bytes.fromhex("3B8D8001")
+        for i, value in enumerate(raw_atr):
+            atr[i] = value.to_bytes(1, "little")
+        atr_len._obj.value = len(raw_atr)
+        return hc.SCARD_S_SUCCESS
+
+    fake_sc.SCardListReaders.side_effect = list_readers
+    fake_sc.SCardConnect.return_value = hc.SCARD_S_SUCCESS
+    fake_sc.SCardStatus.side_effect = status
+    with mock.patch.object(hc, "_load_pcsc", return_value=fake_sc):
+        result = hc.check_ccid(apdu_checks=False)
+    entry = result["readers"][0]["Generic CCID 0"]
+    assert entry["verdict"] == hc.VERDICT_PASS
+    assert result["verdict"] == hc.VERDICT_NOT_RUN
+    assert "não executado" in entry["observed"]
+
+
+def test_cli_strict_blocked_exit_code_and_json(monkeypatch, capsys):
+    blocked_hid = {
+        "hid_devices": [],
+        "ctap_ok": False,
+        "get_info": None,
+        "verdict": hc.VERDICT_BLOCKED,
+        "expected": "HID real",
+        "observed": "sem dispositivo",
+    }
+    blocked_ccid = {
+        "readers": [],
+        "verdict": hc.VERDICT_BLOCKED,
+        "expected": "CCID real",
+        "observed": "sem leitor",
+    }
+    monkeypatch.setattr(hc, "check_fido2_lib", lambda: {"present": False, "version": None})
+    monkeypatch.setattr(hc, "check_opensc", lambda timeout=10.0: {"present": False, "version": None})
+    monkeypatch.setattr(hc, "check_ykman", lambda timeout=10.0: {"present": False, "version": None})
+    monkeypatch.setattr(hc, "check_hid", lambda: blocked_hid)
+    monkeypatch.setattr(hc, "check_ccid", lambda: blocked_ccid)
+    monkeypatch.setattr("sys.argv", ["hardware_check.py", "--json", "--strict-hardware"])
+
+    assert hc.main() == hc.EXIT_BLOCKED
+    data = json.loads(capsys.readouterr().out)
+    assert data["verdict"] == hc.VERDICT_BLOCKED
+    assert data["exit_code"] == hc.EXIT_BLOCKED
+    assert data["observed"]["hardware_validated"] is False
