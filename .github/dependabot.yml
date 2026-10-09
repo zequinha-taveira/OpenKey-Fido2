@@ -12,7 +12,7 @@ updates:
           - "*"
 
   - package-ecosystem: "pip"
-    directory: "/"
+    directory: "/python/openkey_core"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
