@@ -57,4 +57,3 @@ mod tests {
         assert_eq!(CtapStatusCode::KeyStoreFull as u8, 0x28);
     }
 }
-

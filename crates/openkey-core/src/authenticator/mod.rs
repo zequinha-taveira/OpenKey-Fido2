@@ -1,5 +1,6 @@
 //! MCU-independent authenticator domain state.
 
+#[allow(clippy::module_inception)]
 pub mod authenticator;
 pub mod capabilities;
 pub mod state;

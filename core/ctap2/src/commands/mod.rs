@@ -1,9 +1,9 @@
 //! CTAP2 command definitions and handlers.
 
-pub mod make_credential;
+pub mod client_pin;
 pub mod get_assertion;
 pub mod get_info;
-pub mod client_pin;
+pub mod make_credential;
 pub mod reset;
 
 /// Standard CTAP2 command byte codes.

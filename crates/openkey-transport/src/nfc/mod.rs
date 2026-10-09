@@ -8,11 +8,12 @@
 
 extern crate alloc;
 
-pub mod nfc;
+#[path = "nfc.rs"]
+mod transport;
 
 #[cfg(feature = "embedded")]
 pub mod framed_nfc;
 
 #[cfg(feature = "embedded")]
 pub use framed_nfc::FramedNfcTransport;
-pub use nfc::NfcTransport;
+pub use transport::NfcTransport;

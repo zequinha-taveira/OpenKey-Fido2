@@ -17,7 +17,6 @@ use ring::agreement::{self, EphemeralPrivateKey, UnparsedPublicKey, X25519};
 use ring::hkdf::{self, HKDF_SHA256};
 use ring::rand::{SecureRandom, SystemRandom};
 use x25519_dalek::{PublicKey as DalekPublicKey, StaticSecret};
-use zeroize::Zeroize;
 
 extern crate alloc;
 
@@ -359,19 +358,18 @@ pub fn hybrid_decrypt_static(
         .map_err(|_| "invalid ephemeral key")?;
     let ephemeral_pub = DalekPublicKey::from(ephem_array);
 
-    let mut shared_secret = secret.diffie_hellman(&ephemeral_pub);
-    let shared_secret_bytes = *shared_secret.as_bytes();
-    shared_secret.zeroize();
-
-    let mut symmetric_key_bytes = derive_symmetric_key(
-        &shared_secret_bytes,
+    let shared_secret = secret.diffie_hellman(&ephemeral_pub);
+    let symmetric_key_bytes = Zeroizing::new(derive_symmetric_key(
+        shared_secret.as_bytes(),
         &ciphertext.ephemeral_public_key,
         recipient_public,
-    )?;
+    )?);
+    // x25519-dalek 3 limpa SharedSecret automaticamente no Drop quando a
+    // feature `zeroize` está habilitada; a chave derivada usa o wrapper local.
+    drop(shared_secret);
 
-    let unbound_key = UnboundKey::new(&CHACHA20_POLY1305, &symmetric_key_bytes)
+    let unbound_key = UnboundKey::new(&CHACHA20_POLY1305, &*symmetric_key_bytes)
         .map_err(|e| format!("Failed to create cipher key: {:?}", e))?;
-    symmetric_key_bytes.zeroize();
 
     let key = LessSafeKey::new(unbound_key);
     let nonce = Nonce::assume_unique_for_key(ciphertext.nonce);

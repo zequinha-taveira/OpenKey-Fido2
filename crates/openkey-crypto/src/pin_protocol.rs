@@ -181,7 +181,7 @@ impl PinUvProtocol {
     /// - Protocolo 2: AES-256-CBC com a metade AES de `shared_secret`
     ///   (64 bytes) e IV aleatório de 16 bytes prefixado ao ciphertext.
     pub fn encrypt(&self, shared_secret: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
-        if plaintext.len() % AES_BLOCK_LEN != 0 {
+        if !plaintext.len().is_multiple_of(AES_BLOCK_LEN) {
             return Err(format!(
                 "Plaintext must be a multiple of {} bytes, got {}",
                 AES_BLOCK_LEN,
@@ -514,7 +514,7 @@ mod tests {
     fn test_encrypt_decrypt_v1_roundtrip_zero_iv() {
         let proto = PinUvProtocol::new(1).unwrap();
         let plaintext = b"0123456789abcdef";
-        let v1_key = kdf_v1(&Z);
+        let v1_key = proto.kdf(&Z).unwrap();
         assert_eq!(v1_key, V1_KDF_EXPECTED);
         let ct = proto.encrypt(&v1_key, plaintext).unwrap();
         assert_eq!(ct.len(), 16);
@@ -547,7 +547,7 @@ mod tests {
     fn test_encrypt_decrypt_v2_roundtrip_iv_prefix() {
         let proto = PinUvProtocol::new(2).unwrap();
         // chave derivada do vetor de teste.
-        let mut key64 = [V2_HMAC_KEY_EXPECTED, V2_AES_KEY_EXPECTED].concat();
+        let key64 = [V2_HMAC_KEY_EXPECTED, V2_AES_KEY_EXPECTED].concat();
         let plaintext = b"0123456789abcdef";
         let ct = proto.encrypt(&key64, plaintext).unwrap();
         assert_eq!(ct.len(), 32);

@@ -9,8 +9,8 @@ use openkey_core::ctap2::{AttestationCertificate, AttestationFormat};
 extern crate alloc;
 
 use crate::config::{
-    AttestationType, Extension, PinPolicy, Protocol, Transport, TransportConfig, TransportType,
-    UsbIdentity, UsbVendorPreset,
+    AttestationType, Extension, PinPolicy, Protocol, Transport, TransportConfig, UsbIdentity,
+    UsbVendorPreset,
 };
 
 /// Product-level configuration that combines a board definition with
@@ -382,6 +382,7 @@ impl Default for DeviceProfileBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::TransportType;
 
     #[test]
     fn test_single_transport_config_is_legacy_compatible() {

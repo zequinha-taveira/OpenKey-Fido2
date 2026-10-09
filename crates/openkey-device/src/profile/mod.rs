@@ -10,6 +10,7 @@
 /// Relato de capabilities em runtime.
 pub mod capability;
 /// Perfil de produto e seu builder.
+#[allow(clippy::module_inception)]
 pub mod profile;
 
 pub use capability::{Capabilities, CapabilityDiscovery};
