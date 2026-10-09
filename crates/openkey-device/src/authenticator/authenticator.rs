@@ -616,12 +616,17 @@ mod tests {
 
     #[derive(Debug)]
     struct MockBoardUserVerification {
+        succeed: bool,
         retries: u8,
     }
 
     impl UserVerificationDevice for MockBoardUserVerification {
         fn verify_user(&mut self) -> Result<(), board_generic::UserVerificationError> {
-            Ok(())
+            if self.succeed {
+                Ok(())
+            } else {
+                Err(board_generic::UserVerificationError::VerificationFailed)
+            }
         }
 
         fn retries(&self) -> u8 {
@@ -630,13 +635,19 @@ mod tests {
     }
 
     #[test]
+    fn test_uv_support_without_device_does_not_advertise_uv() {
+        let profile = DeviceProfileBuilder::new().uv_support(true).build();
+        let auth = EmbeddedAuthenticator::new_with_profile(profile).unwrap();
+
+        assert!(!auth.get_info().unwrap().options.contains(&"uv".to_string()));
+    }
+
+    #[test]
     fn test_uv_mock_wiring_advertises_uv_with_profile_cap() {
         let profile = DeviceProfileBuilder::new().uv_support(true).build();
         let mut auth = EmbeddedAuthenticator::new_with_profile(profile).unwrap();
-        // Capability `uv` sem mock => não anunciado (padrão, sem hardware).
-        assert!(!auth.get_info().unwrap().options.contains(&"uv".to_string()));
-        // Com mock injetado => anunciado.
         auth.set_user_verification(Some(Box::new(MockUserVerification { retries: 3 })));
+
         assert!(auth.get_info().unwrap().options.contains(&"uv".to_string()));
     }
 
@@ -644,9 +655,42 @@ mod tests {
     fn test_board_uv_wiring_advertises_uv_with_profile_cap() {
         let profile = DeviceProfileBuilder::new().uv_support(true).build();
         let mut auth = EmbeddedAuthenticator::new_with_profile(profile).unwrap();
-        auth.set_board_user_verification(Some(Box::new(MockBoardUserVerification { retries: 5 })));
+        auth.set_board_user_verification(Some(Box::new(MockBoardUserVerification {
+            succeed: true,
+            retries: 5,
+        })));
 
         assert!(auth.get_info().unwrap().options.contains(&"uv".to_string()));
+    }
+
+    #[test]
+    fn test_board_uv_failure_maps_to_uv_blocked() {
+        let mut verification = BoardUserVerification {
+            device: Box::new(MockBoardUserVerification {
+                succeed: false,
+                retries: 2,
+            }),
+        };
+
+        assert_eq!(
+            <BoardUserVerification as ctap2::UserVerification>::verify(&mut verification),
+            Err(ctap2::Ctap2Error::UvBlocked)
+        );
+    }
+
+    #[test]
+    fn test_board_uv_retries_are_forwarded() {
+        let verification = BoardUserVerification {
+            device: Box::new(MockBoardUserVerification {
+                succeed: true,
+                retries: 4,
+            }),
+        };
+
+        assert_eq!(
+            <BoardUserVerification as ctap2::UserVerification>::retries(&verification),
+            4
+        );
     }
 
     fn resident_request() -> ctap2::MakeCredentialRequest {
