@@ -37,8 +37,10 @@ conformance test suites. No hardware required to develop and test.
 ```text
 crates/       openkey-core, openkey-crypto, openkey-storage, openkey-transport,
               openkey-hal, openkey-device
+core/         authenticator, credentials, ctap2, webauthn workspace crates
 targets/      generic, rp2040, rp2350, stm32, simulator
-tests/        Rust suite + Python pytest (incl. conformance/)
+tests/        Rust test crate
+tests/python/ Python pytest suite (E2E, conformance/, diagnostics/)
 examples/     basic, crypto, ctap, storage, transport, webauthn
 tools/        ctaphid_bridge.py and helpers
 docs/         architecture.md, modular-design.md, security-model.md, adr/
@@ -51,8 +53,8 @@ and extension points.
 ## Quickstart
 
 Prerequisites: Rust `1.85+` (`rustup target add thumbv8m.main-none-eabihf`
-for RP2350, `thumbv7em-none-eabihf` for STM32), Python `3.9+`
-with `pytest` + `fido2` for E2E.
+for RP2350, `thumbv7em-none-eabihf` for STM32), Python `3.9+`.
+Python test dependencies are listed in `tests/python/requirements.txt`.
 
 ```sh
 # Host build + tests
@@ -69,9 +71,15 @@ cargo run -p fido2-simulator
 # Raw CBOR wire mode (used by conformance suite / bridge)
 cargo run -p fido2-simulator -- --raw-cbor
 
-# Python E2E + conformance
-python -m pytest tests/python -v
-python -m pytest tests/python/conformance -v
+# Python extension and test dependencies (same setup used by CI)
+python -m pip install -r tests/python/requirements.txt
+python -m pip install maturin
+python -m maturin build --release --manifest-path python/openkey_core/Cargo.toml --interpreter python
+python -m pip install --force-reinstall python/openkey_core/target/wheels/*.whl
+
+# Python E2E + conformance (same entry point used by CI)
+PYTHONPATH=targets/simulator/python:tests/python \
+  python -m pytest tests/python
 
 # Unified build script (Linux/macOS/WSL)
 ./build_openkey_fido2.sh --help

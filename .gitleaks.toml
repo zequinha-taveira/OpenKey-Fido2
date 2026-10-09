@@ -1,0 +1,13 @@
+title = "OpenKey-Fido2 Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Vendored ring test vectors and keys for the RP2350 target"
+# The RP2350 vendor/ring tree is a vendored dependency containing upstream
+# cryptographic test vectors and test keys; these are test artifacts, not
+# repository credentials. Keep the exception scoped to this vendor directory.
+paths = [
+  '''^targets/rp2350/vendor/.*$''',
+]
