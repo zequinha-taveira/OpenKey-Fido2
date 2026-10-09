@@ -1,0 +1,48 @@
+name: Fuzz smoke
+
+on:
+  pull_request:
+    paths:
+      - "fuzz/**"
+      - "crates/openkey-core/**"
+      - "crates/openkey-crypto/**"
+      - "crates/openkey-storage/**"
+      - "crates/openkey-transport/**"
+      - ".github/workflows/fuzz.yml"
+  push:
+    branches: [main]
+    paths:
+      - "fuzz/**"
+      - "crates/openkey-core/**"
+      - "crates/openkey-crypto/**"
+      - "crates/openkey-storage/**"
+      - "crates/openkey-transport/**"
+      - ".github/workflows/fuzz.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: libFuzzer smoke (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - decode_cbor
+          - ctap2_dispatch
+          - ctaphid_framing
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
+
+      - name: Run bounded fuzz smoke test
+        run: cargo +nightly fuzz run ${{ matrix.target }} --fuzz-dir fuzz -- -max_total_time=30 -print_final_stats=1
