@@ -28,7 +28,7 @@ features = ["getrandom"]
 optional = true
 
 [dependencies.num-bigint-dig]
-version = "0.8"
+version = "0.9"
 optional = true
 
 [target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
