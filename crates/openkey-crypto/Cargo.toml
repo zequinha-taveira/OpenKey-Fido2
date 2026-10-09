@@ -22,11 +22,13 @@ features = ["sha2"]
 optional = true
 
 [dependencies.rand]
-workspace = true
+version = "0.8"
+default-features = false
+features = ["getrandom"]
 optional = true
 
 [dependencies.num-bigint-dig]
-version = "0.9"
+version = "0.8"
 optional = true
 
 [target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]

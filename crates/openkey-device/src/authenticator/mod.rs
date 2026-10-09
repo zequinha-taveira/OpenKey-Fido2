@@ -10,6 +10,7 @@
 //! `std`.
 
 /// Coordenação das camadas do firmware.
+#[allow(clippy::module_inception)]
 pub mod authenticator;
 
 pub use authenticator::EmbeddedAuthenticator;

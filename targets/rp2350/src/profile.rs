@@ -34,7 +34,7 @@ pub const RP2350: BoardDefinition = rp2350_with_pins(Rp2350Pins {
 /// Use this when the target board uses different GPIOs than the defaults.
 ///
 /// ```
-/// use profile_rp2350::{rp2350_with_pins, Rp2350Pins};
+/// use rp2350_firmware::{rp2350_with_pins, Rp2350Pins};
 ///
 /// let board = rp2350_with_pins(Rp2350Pins {
 ///     i2c_sda: 2,

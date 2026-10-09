@@ -511,7 +511,7 @@ impl WearLevelCounter {
             // only warns to avoid failing legitimate storage after 10k writes.
             // The threshold is informational; operation succeeds.
         } else if self.write_count > WEAR_LEVELING_THRESHOLD
-            && (self.write_count - WEAR_LEVELING_THRESHOLD) % 1000 == 0
+            && (self.write_count - WEAR_LEVELING_THRESHOLD).is_multiple_of(1000)
         {
             warn!(
                 "Wear leveling still beyond threshold for sector '{}' (count={}) - periodic reminder (every 1000 writes)",

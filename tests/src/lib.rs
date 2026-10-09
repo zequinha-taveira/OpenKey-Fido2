@@ -11,7 +11,6 @@ use ctap2::{
     CredentialDescriptor, Ctap2Authenticator, Ctap2Error, GetAssertionOptions, GetAssertionRequest,
     MakeCredentialOptions, MakeCredentialRequest, PublicKeyCredParams, RelyingParty, User,
 };
-use rand::RngCore;
 use storage::StorageEngine;
 
 fn make_request(user_id: &[u8]) -> MakeCredentialRequest {

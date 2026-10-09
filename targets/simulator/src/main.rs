@@ -133,7 +133,7 @@ fn new_card_router_over(
 /// Decodifica hex (`"00a4..."`) em bytes; rejeita ímpar, vazio ou não-hex.
 fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
     let hex = hex.trim();
-    if hex.is_empty() || hex.len() % 2 != 0 {
+    if hex.is_empty() || !hex.len().is_multiple_of(2) {
         return Err("campo apdu deve ser hex com nº par de dígitos".to_string());
     }
     let mut out = Vec::with_capacity(hex.len() / 2);

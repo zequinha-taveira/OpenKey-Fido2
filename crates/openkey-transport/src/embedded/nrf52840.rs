@@ -210,7 +210,6 @@ impl BleGattDevice for Nrf52840BleGatt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::Transport;
     use embedded_hal::digital::{ErrorType, OutputPin};
 
     #[derive(Debug)]

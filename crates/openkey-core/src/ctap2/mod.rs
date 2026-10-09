@@ -20,6 +20,7 @@ pub mod commands;
 /// Comando Credential Management (CTAP2 0x0A).
 pub mod cred_mgmt;
 /// Máquina de estado CTAP2 e tipos de request/response.
+#[allow(clippy::module_inception)]
 pub mod ctap2;
 /// Extensão `hmac-secret` (CTAP 2.1 §12.5).
 pub mod hmac_secret;
