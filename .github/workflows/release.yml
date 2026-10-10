@@ -1,0 +1,117 @@
+name: Release artifacts
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      hardware_validated:
+        description: "A validação física dos artefatos foi concluída?"
+        required: true
+        type: boolean
+      conformance_validated:
+        description: "O FIDO Conformance Tool foi executado e aprovado?"
+        required: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, sign and publish release artifacts
+    # Tags only prepare/validate the workflow definition. Publication requires
+    # a manual dispatch with both external validation gates explicitly enabled.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.hardware_validated == true &&
+      inputs.conformance_validated == true
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv8m.main-none-eabihf
+
+      - name: Install RP2350 build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            gcc-arm-none-eabi \
+            binutils-arm-none-eabi
+
+      - name: Build RP2350 firmware
+        run: |
+          cargo build \
+            --manifest-path targets/rp2350/Cargo.toml \
+            --release \
+            --features firmware \
+            --target thumbv8m.main-none-eabihf \
+            --locked
+
+      - name: Stage and checksum artifact
+        env:
+          BUILT_ELF: ${{ github.workspace }}/target/thumbv8m.main-none-eabihf/release/rp2350-firmware
+          STAGING_DIR: ${{ runner.temp }}/openkey-release
+        run: |
+          set -Eeuo pipefail
+          test -f "$BUILT_ELF"
+          mkdir -p "$STAGING_DIR"
+          cp "$BUILT_ELF" "$STAGING_DIR/rp2350-firmware.elf"
+          (
+            cd "$STAGING_DIR"
+            sha256sum rp2350-firmware.elf > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.8.1
+
+      - name: Require signing secrets
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$COSIGN_PRIVATE_KEY" || { echo "COSIGN_PRIVATE_KEY is required" >&2; exit 1; }
+          test -n "$COSIGN_PUBLIC_KEY" || { echo "COSIGN_PUBLIC_KEY is required" >&2; exit 1; }
+          test -n "$COSIGN_PASSWORD" || { echo "COSIGN_PASSWORD is required" >&2; exit 1; }
+
+      - name: Sign and verify checksums
+        working-directory: ${{ runner.temp }}/openkey-release
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          printf '%s\n' "$COSIGN_PRIVATE_KEY" > cosign.key
+          printf '%s\n' "$COSIGN_PUBLIC_KEY" > cosign.pub
+          cosign sign-blob --yes --key cosign.key --output-signature SHA256SUMS.sig SHA256SUMS
+          cosign verify-blob --key cosign.pub --signature SHA256SUMS.sig SHA256SUMS
+          rm -f cosign.key cosign.pub
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openkey-${{ github.ref_name }}
+          path: ${{ runner.temp }}/openkey-release/*
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "OpenKey-Fido2 $GITHUB_REF_NAME" \
+            --generate-notes \
+            "${{ runner.temp }}/openkey-release/rp2350-firmware.elf" \
+            "${{ runner.temp }}/openkey-release/SHA256SUMS" \
+            "${{ runner.temp }}/openkey-release/SHA256SUMS.sig"

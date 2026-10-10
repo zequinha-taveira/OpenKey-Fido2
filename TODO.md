@@ -78,7 +78,7 @@ completos; itens com 🚧 estão em progresso; itens com ❌ são incrementos fu
 - ✅ AGENTS.md (guia do agente)
 - ✅ TODO.md (este arquivo)
 - ✅ Virtual board em Python (`simulator/python/board/`): cbor, gpio, i2c, spi, ccid, board, profiles
-- ✅ **Release CI criado: `.github/workflows/nightly.yml`** (build, test, artifacts, checksums `SHA256SUMS`, assinatura `SHA256SUMS.sig` quando `PRIVATE_KEY_B64` presente; `release.yml` antigo removido em `68bdc5c`)
+- ✅ **Release CI criado: `.github/workflows/release.yml`** (build real do RP2350, `SHA256SUMS`, assinatura/verificação Cosign e publicação manual somente com gates explícitos de hardware e FIDO Conformance; tags sozinhas não publicam)
 
 ---
 
