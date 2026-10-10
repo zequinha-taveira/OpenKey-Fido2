@@ -11,14 +11,30 @@ Suíte `pytest` que cobre, em camadas crescentes de fidelidade ao wire format:
 
 ## Como rodar
 
-A partir da raiz do workspace:
+A partir da raiz do workspace, a suíte completa usa o simulador Rust, o
+wheel `openkey_core` e dois diretórios no `PYTHONPATH`:
 
-```
-python -m pytest tests/python -v
+```bash
+python -m pip install -r tests/python/requirements.txt
+python -m pip install maturin
+python -m maturin build --release \
+  --manifest-path python/openkey_core/Cargo.toml \
+  --interpreter python --out /tmp/openkey-wheels
+python -m pip install --force-reinstall /tmp/openkey-wheels/*.whl
+
+cargo build -p fido2-simulator
+PYTHONPATH=targets/simulator/python:tests/python \
+  python -m pytest tests/python -v
 ```
 
-Requisitos: `pytest` e `fido2` (`pip install pytest fido2`). Não há
-`requirements.txt` nem `pytest.ini` no repositório.
+No Windows, use `set PYTHONPATH=targets\simulator\python;tests\python` ou o
+equivalente do PowerShell. Em shells Unix, `PYTHONPATH` é separado por `:`;
+no Windows, por `;`.
+
+O comando `cargo build -p fido2-simulator` é necessário para os testes de
+CTAP2/conformance que iniciam o simulador local. Sem ele, a coleta pode
+terminar com `FileNotFoundError` mesmo que o módulo `openkey_core` esteja
+instalado. O baseline observado no Sandbox Linux foi **332 passed, 5 skipped**.
 
 ## Autenticador virtual (`openkey-core`)
 
@@ -27,9 +43,9 @@ Os testes de `test_virtual_authenticator.py` dependem do wheel
 que compila para firmware) via pyo3/maturin. Para (re)compilar e instalar
 após mudanças em Rust:
 
-```
-python -m maturin build --manifest-path python\openkey_core\Cargo.toml --interpreter python
-pip install --user --force-reinstall python\openkey_core\target\wheels\openkey_core-0.1.0-cp39-abi3-win_amd64.whl
+```bash
+python -m maturin build --manifest-path python/openkey_core/Cargo.toml --interpreter python
+python -m pip install --force-reinstall python/openkey_core/target/wheels/openkey_core-*.whl
 ```
 
 `maturin develop` exige um venv; neste ambiente use `maturin build` + `pip
