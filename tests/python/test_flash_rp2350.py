@@ -1,14 +1,20 @@
 """Testes do wrapper flash_rp2350 (dry-run sem HW)."""
 
 import json
+import importlib.util
 import subprocess
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
 
 TOOLS_DIR = Path(__file__).resolve().parents[2] / "tools"
 FLASH = TOOLS_DIR / "flash_rp2350.py"
+SPEC = importlib.util.spec_from_file_location("flash_rp2350", FLASH)
+FLASH_MODULE = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+SPEC.loader.exec_module(FLASH_MODULE)
 
 
 def run_flash(*args):
@@ -75,3 +81,20 @@ def test_dry_run_post_check_is_declared_without_hardware():
     out = run_flash("--dry-run", "--post-check", "--json")
     data = json.loads(out)
     assert data["post_check"] == {"would_run": True, "strict": True}
+
+
+def test_post_check_parses_verdict_and_propagates_exit_code(monkeypatch):
+    payload = {"verdicts": {"overall": "BLOCKED"}}
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[-2:] == ["--json", "--strict"]
+        assert kwargs["capture_output"] is True
+        return SimpleNamespace(returncode=2, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(FLASH_MODULE.subprocess, "run", fake_run)
+    result = FLASH_MODULE.run_post_check()
+
+    assert result["ok"] is False
+    assert result["returncode"] == 2
+    assert result["verdict"] == "BLOCKED"
+    assert result["hardware_check"] == payload
