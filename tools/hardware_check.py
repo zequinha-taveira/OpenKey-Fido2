@@ -444,6 +444,78 @@ def check_ykman(timeout=10.0):
     return out
 
 
+VERDICTS = ("PASS", "FAIL", "BLOCKED", "NOT_RUN")
+
+
+def summarize_verdicts(result):
+    """Derive deterministic machine-readable verdicts from probe results.
+
+    ``BLOCKED`` means that a physical device or host service is unavailable.
+    ``NOT_RUN`` is reserved for optional tools that are not installed. A
+    probe that reached a device but observed a transport failure is ``FAIL``.
+    """
+    hid = result.get("hid", {})
+    if not result.get("fido2", {}).get("present"):
+        hid_verdict = "NOT_RUN"
+        hid_reason = "python-fido2 indisponível"
+    elif hid.get("error"):
+        hid_verdict = "FAIL"
+        hid_reason = f"falha ao sondar HID: {hid['error']}"
+    elif not hid.get("hid_devices"):
+        hid_verdict = "BLOCKED"
+        hid_reason = "nenhum dispositivo HID FIDO enumerado"
+    elif not hid.get("ctap_ok"):
+        hid_verdict = "FAIL"
+        hid_reason = "CTAPHID ping não respondeu com o eco esperado"
+    else:
+        hid_verdict = "PASS"
+        hid_reason = "HID enumerado e CTAPHID ping validado"
+
+    ccid = result.get("ccid", {})
+    if ccid.get("error"):
+        ccid_verdict = "BLOCKED"
+        ccid_reason = ccid["error"]
+    elif not ccid.get("readers"):
+        ccid_verdict = "BLOCKED"
+        ccid_reason = "nenhum leitor PC/SC enumerado"
+    else:
+        reader_entries = [entry for item in ccid["readers"] for entry in item.values()]
+        hard_failures = [
+            entry
+            for entry in reader_entries
+            if entry.get("connect_error") or entry.get("mute") or not entry.get("atr")
+        ]
+        if hard_failures:
+            ccid_verdict = "FAIL"
+            ccid_reason = "leitor encontrado, mas conexão/ATR falhou"
+        else:
+            ccid_verdict = "PASS"
+            ccid_reason = "leitor conectado e ATR presente"
+
+    tool_verdicts = {}
+    for name in ("fido2", "opensc", "ykman"):
+        info = result.get(name, {})
+        tool_verdicts[name] = {
+            "verdict": "PASS" if info.get("present") else "NOT_RUN",
+            "reason": "ferramenta disponível" if info.get("present") else "ferramenta opcional ausente",
+        }
+
+    hardware_pair = (hid_verdict, ccid_verdict)
+    overall = "FAIL" if "FAIL" in hardware_pair else (
+        "PASS" if "PASS" in hardware_pair else "BLOCKED"
+    )
+    verdicts = {
+        "overall": overall,
+        "hardware": {
+            "hid": {"verdict": hid_verdict, "reason": hid_reason},
+            "ccid": {"verdict": ccid_verdict, "reason": ccid_reason},
+        },
+        "tools": tool_verdicts,
+    }
+    assert verdicts["overall"] in VERDICTS
+    return verdicts
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true", help="saída JSON pura")
@@ -474,6 +546,7 @@ def main():
         "hid": check_hid(),
         "ccid": check_ccid(),
     }
+    result["verdicts"] = summarize_verdicts(result)
     if args.json:
         print(json.dumps(result, indent=2))
         return
@@ -542,6 +615,11 @@ def main():
         print(f"  ykman: presente versão={ykman.get('version')}")
     else:
         print("  ykman: ausente (ferramenta de fabricante — validação física opcional)")
+
+    print("=== VEREDICTOS ESTRUTURADOS ===")
+    print(f"  overall: {result['verdicts']['overall']}")
+    for name, check in result["verdicts"]["hardware"].items():
+        print(f"  {name}: {check['verdict']} — {check['reason']}")
 
 
 if __name__ == "__main__":

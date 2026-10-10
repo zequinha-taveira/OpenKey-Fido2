@@ -238,3 +238,60 @@ def test_cli_json_includes_neutral_tools_and_identity_note():
     assert isinstance(data["opensc"]["present"], bool)
     assert isinstance(data["ykman"]["present"], bool)
 
+
+
+def test_verdicts_blocked_when_hardware_is_unavailable():
+    result = {
+        "fido2": {"present": True},
+        "opensc": {"present": False},
+        "ykman": {"present": False},
+        "hid": {"hid_devices": [], "ctap_ok": False},
+        "ccid": {"readers": [], "error": "PC/SC indisponível"},
+    }
+    verdicts = hc.summarize_verdicts(result)
+    assert verdicts["overall"] == "BLOCKED"
+    assert verdicts["hardware"]["hid"]["verdict"] == "BLOCKED"
+    assert verdicts["hardware"]["ccid"]["verdict"] == "BLOCKED"
+    assert verdicts["tools"]["opensc"]["verdict"] == "NOT_RUN"
+
+
+def test_verdicts_pass_when_one_hardware_transport_is_valid():
+    result = {
+        "fido2": {"present": True},
+        "opensc": {"present": True},
+        "ykman": {"present": False},
+        "hid": {"hid_devices": [{"path": "mock"}], "ctap_ok": True},
+        "ccid": {"readers": [], "error": "nenhum leitor PCSC"},
+    }
+    verdicts = hc.summarize_verdicts(result)
+    assert verdicts["overall"] == "PASS"
+    assert verdicts["hardware"]["hid"]["verdict"] == "PASS"
+    assert verdicts["hardware"]["ccid"]["verdict"] == "BLOCKED"
+    assert verdicts["tools"]["opensc"]["verdict"] == "PASS"
+
+
+def test_verdicts_fail_when_hid_reaches_device_but_ping_fails():
+    result = {
+        "fido2": {"present": True},
+        "opensc": {"present": False},
+        "ykman": {"present": False},
+        "hid": {"hid_devices": [{"path": "mock"}], "ctap_ok": False},
+        "ccid": {"readers": [], "error": "nenhum leitor PCSC"},
+    }
+    verdicts = hc.summarize_verdicts(result)
+    assert verdicts["overall"] == "FAIL"
+    assert verdicts["hardware"]["hid"]["verdict"] == "FAIL"
+
+
+def test_verdicts_pass_for_connected_ccid_with_atr():
+    result = {
+        "fido2": {"present": False},
+        "opensc": {"present": False},
+        "ykman": {"present": False},
+        "hid": {"hid_devices": [], "ctap_ok": False},
+        "ccid": {"readers": [{"Mock Reader": {"atr": "3b8d8001", "mute": False}}]},
+    }
+    verdicts = hc.summarize_verdicts(result)
+    assert verdicts["overall"] == "PASS"
+    assert verdicts["hardware"]["ccid"]["verdict"] == "PASS"
+    assert verdicts["hardware"]["hid"]["verdict"] == "NOT_RUN"
