@@ -15,7 +15,7 @@ Nota sobre identidades USB:
   (0x1050:0x0407, Product Name: "Yubico Yubikey" / "YubiKey OTP+FIDO+CCID") build,
   not for distribution.
 
-Uso: python tools/hardware_check.py [--json] [--ykman-timeout S] [--opensc-timeout S]
+Uso: python tools/hardware_check.py [--json] [--strict] [--ykman-timeout S] [--opensc-timeout S]
 """
 
 import argparse
@@ -447,6 +447,11 @@ def check_ykman(timeout=10.0):
 VERDICTS = ("PASS", "FAIL", "BLOCKED", "NOT_RUN")
 
 
+def verdict_exit_code(verdict):
+    """Map a hardware verdict to a stable automation exit code."""
+    return {"PASS": 0, "FAIL": 1, "BLOCKED": 2, "NOT_RUN": 3}[verdict]
+
+
 def summarize_verdicts(result):
     """Derive deterministic machine-readable verdicts from probe results.
 
@@ -520,6 +525,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true", help="saída JSON pura")
     ap.add_argument(
+        "--strict",
+        action="store_true",
+        help="retorna código não-zero para FAIL/BLOCKED/NOT_RUN",
+    )
+    ap.add_argument(
         "--ykman-timeout",
         type=float,
         default=10.0,
@@ -549,7 +559,7 @@ def main():
     result["verdicts"] = summarize_verdicts(result)
     if args.json:
         print(json.dumps(result, indent=2))
-        return
+        return verdict_exit_code(result["verdicts"]["overall"]) if args.strict else 0
 
     print("=== IDENTIDADE USB PADRÃO vs OPT-IN ===")
     print("  " + IDENTITY_NOTE)
@@ -620,7 +630,8 @@ def main():
     print(f"  overall: {result['verdicts']['overall']}")
     for name, check in result["verdicts"]["hardware"].items():
         print(f"  {name}: {check['verdict']} — {check['reason']}")
+    return verdict_exit_code(result["verdicts"]["overall"]) if args.strict else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

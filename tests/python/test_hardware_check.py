@@ -295,3 +295,10 @@ def test_verdicts_pass_for_connected_ccid_with_atr():
     assert verdicts["overall"] == "PASS"
     assert verdicts["hardware"]["ccid"]["verdict"] == "PASS"
     assert verdicts["hardware"]["hid"]["verdict"] == "NOT_RUN"
+
+
+def test_verdict_exit_codes_are_stable_for_automation():
+    assert hc.verdict_exit_code("PASS") == 0
+    assert hc.verdict_exit_code("FAIL") == 1
+    assert hc.verdict_exit_code("BLOCKED") == 2
+    assert hc.verdict_exit_code("NOT_RUN") == 3
