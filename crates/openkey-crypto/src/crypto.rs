@@ -3,7 +3,7 @@ use alloc::{format, vec, vec::Vec};
 use core::fmt::Debug;
 use core::num::NonZeroU32;
 #[cfg(feature = "rs256")]
-use num_bigint_dig::BigUint;
+use rsa::BigUint;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
 use ring::digest;
 use ring::hmac;
