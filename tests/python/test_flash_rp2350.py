@@ -69,3 +69,9 @@ def test_dry_run_validates_args_without_hw():
     assert data["dry_run"] is True
     # elf_exists false mas não falha em dry-run
     assert data["elf_exists"] is False
+
+
+def test_dry_run_post_check_is_declared_without_hardware():
+    out = run_flash("--dry-run", "--post-check", "--json")
+    data = json.loads(out)
+    assert data["post_check"] == {"would_run": True, "strict": True}
