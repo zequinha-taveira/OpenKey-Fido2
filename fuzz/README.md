@@ -9,16 +9,27 @@ próprios que não devem afetar `cargo build --workspace`.
 
 ## Pré-requisitos
 
-`libFuzzer` exige toolchain nightly, `cargo-fuzz` e um alvo Unix
-(Linux/macOS). No Windows, use WSL ou o CI. A presença dos alvos abaixo só
-garante que eles compilam; nenhuma execução é implícita.
+`libFuzzer` exige toolchain nightly, `cargo-fuzz` e um alvo Unix (Linux/macOS).
+No Windows, use WSL ou o CI. A presença dos alvos abaixo só garante que eles
+compilam; nenhuma execução é implícita.
 
 ```bash
 rustup toolchain install nightly
 cargo install cargo-fuzz
 ```
 
-## Rodar
+## Smoke test automatizado
+
+O workflow [`.github/workflows/fuzz.yml`](../.github/workflows/fuzz.yml) executa
+os três alvos em paralelo em Linux, em cada alteração relevante de protocolo,
+crypto, storage, transport ou fuzzing. Cada alvo roda por no máximo 30 segundos.
+
+Esse job é um **smoke test de regressão**, não uma campanha de cobertura nem uma
+certificação de segurança. Ele comprova somente que os harnesses compilam e não
+produzem crash durante a janela limitada da execução. Hardware, conformance FIDO
+e auditoria criptográfica continuam fora do escopo.
+
+## Rodar localmente
 
 A partir da raiz do workspace:
 
@@ -72,3 +83,4 @@ cargo +nightly fuzz run decode_cbor --fuzz-dir fuzz fuzz/artifacts/decode_cbor/c
 1. Crie `fuzz/fuzz_targets/<nome>.rs` com `#![no_main]` e a macro `fuzz_target!`
 2. Adicione a seção `[[bin]]` correspondente em `fuzz/Cargo.toml`
 3. Documente o alvo na tabela acima
+4. Inclua o alvo na matriz do workflow se ele for parte do gate de regressão
