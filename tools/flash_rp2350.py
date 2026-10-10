@@ -17,6 +17,7 @@ Com HW:
   python tools/flash_rp2350.py --method probe-rs
   python tools/flash_rp2350.py --method picotool
   python tools/flash_rp2350.py --method auto
+  python tools/flash_rp2350.py --method auto --poll --post-check
 """
 
 from __future__ import annotations
@@ -159,6 +160,25 @@ def run_picotool(elf: Path, uf2: Path | None, dry_run: bool) -> dict:
         return {"cmd": cmd, "error": repr(e), "ok": False}
 
 
+def run_post_check(timeout: float = 45.0) -> dict:
+    """Run the neutral HID/CCID validator after a successful flash."""
+    cmd = [sys.executable, str(REPO_ROOT / "tools" / "hardware_check.py"), "--json", "--strict"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception as exc:
+        return {"cmd": cmd, "ok": False, "returncode": None, "error": repr(exc)}
+    result = {"cmd": cmd, "ok": proc.returncode == 0, "returncode": proc.returncode}
+    try:
+        result["hardware_check"] = json.loads(proc.stdout)
+        result["verdict"] = result["hardware_check"].get("verdicts", {}).get("overall")
+    except json.JSONDecodeError:
+        result["stdout"] = proc.stdout[-2000:]
+        result["stderr"] = proc.stderr[-2000:]
+        result["error"] = "hardware_check não produziu JSON válido"
+        result["ok"] = False
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--elf", help="caminho do ELF (default: targets/rp2350/target/.../rp2350-firmware)")
@@ -173,6 +193,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="valida args e mostra comandos sem tocar HW")
     p.add_argument("--poll", action="store_true", help="após gravar, poll USB VID:PID")
     p.add_argument("--poll-timeout", type=float, default=10.0, help="timeout do poll USB (s)")
+    p.add_argument(
+        "--post-check",
+        action="store_true",
+        help="após gravar, executa hardware_check.py --json --strict",
+    )
     p.add_argument("--json", action="store_true", help="saída JSON (CI)")
     args = p.parse_args(argv)
 
@@ -219,6 +244,8 @@ def main(argv: list[str] | None = None) -> int:
             result["picotool"] = pt
         if args.poll:
             result["poll"] = {"would_poll": True, "vid": hex(vid), "pid": hex(pid), "timeout": args.poll_timeout}
+        if args.post_check:
+            result["post_check"] = {"would_run": True, "strict": True}
 
         if args.json:
             print(json.dumps(result, indent=2))
@@ -241,13 +268,15 @@ def main(argv: list[str] | None = None) -> int:
         if pr.get("ok"):
             if args.poll:
                 result["poll"] = poll_usb(vid, pid, timeout=args.poll_timeout)
+            if args.post_check:
+                result["post_check"] = run_post_check()
             if args.json:
                 print(json.dumps(result, indent=2))
             else:
                 print(f"probe-rs OK — {elf} gravado via SWD")
                 if args.poll:
                     print(f"poll USB {vid:04x}:{pid:04x}: {'found' if result['poll'].get('found') else 'not found'}")
-            return 0
+            return result.get("post_check", {}).get("returncode", 0) or 0
         else:
             if args.method == "probe-rs":
                 if args.json:
@@ -263,18 +292,20 @@ def main(argv: list[str] | None = None) -> int:
     pt = run_picotool(elf, Path(args.uf2) if args.uf2 else None, dry_run=False)
     result["picotool"] = pt
     if pt.get("ok"):
+        if args.poll:
+            poll_res = poll_usb(vid, pid, timeout=args.poll_timeout)
+            result["poll"] = poll_res
+        if args.post_check:
+            result["post_check"] = run_post_check()
         if args.json:
             print(json.dumps(result, indent=2))
         else:
             print(f"picotool OK — UF2 {pt.get('uf2')} gerado (copie para unidade RP2350)")
-        if args.poll:
-            poll_res = poll_usb(vid, pid, timeout=args.poll_timeout)
-            result["poll"] = poll_res
-            if args.json:
-                print(json.dumps(result, indent=2))
-            else:
-                print(f"poll USB {vid:04x}:{pid:04x}: {'found' if poll_res.get('found') else 'not found'}")
-        return 0
+            if args.poll:
+                print(f"poll USB {vid:04x}:{pid:04x}: {'found' if result['poll'].get('found') else 'not found'}")
+            if args.post_check:
+                print(f"pós-validação: {result['post_check'].get('verdict', 'erro')}")
+        return result.get("post_check", {}).get("returncode", 0) or 0
     else:
         if args.json:
             print(json.dumps(result, indent=2))
