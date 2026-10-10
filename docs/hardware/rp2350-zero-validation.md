@@ -261,6 +261,8 @@ Dispositivo composto esperado (HID `0xF1D0` + CCID `0x0B`):
   # ou: just hardware-check
   # saída JSON: python tools/hardware_check.py --json
   #             just hardware-check-json
+  # gate de automação: FAIL=1, BLOCKED=2, NOT_RUN=3
+  python tools/hardware_check.py --json --strict
   ```
 
   Esperado: `ctap_ok=true`, `readers` contém o leitor CCID com ATR T=0
