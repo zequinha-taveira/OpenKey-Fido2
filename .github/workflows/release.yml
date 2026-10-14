@@ -69,7 +69,7 @@ jobs:
           )
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3.8.1
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Require signing secrets
         env:
@@ -98,7 +98,7 @@ jobs:
           rm -f cosign.key cosign.pub
 
       - name: Upload signed artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: openkey-${{ github.ref_name }}
           path: ${{ runner.temp }}/openkey-release/*
